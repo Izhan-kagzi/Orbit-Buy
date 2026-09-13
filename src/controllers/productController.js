@@ -1,7 +1,14 @@
 const crypto = require("crypto");
+
 const { readDB, writeDB } = require("../config/db");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
+
+/*
+=====================================================
+VALID PRODUCT SLUGS
+=====================================================
+*/
 
 const VALID_SLUGS = [
   "mens-shirts",
@@ -10,6 +17,7 @@ const VALID_SLUGS = [
   "mens-trackpants",
   "mens-hoodies",
   "mens-jackets",
+
   "women-dresses",
   "women-partywear",
   "women-jeans",
@@ -20,12 +28,145 @@ const VALID_SLUGS = [
   "women-jumpsuits",
 ];
 
-// @route GET /api/products
-// Supports: ?category=Men|Women  ?q=search  ?sort=price_asc|price_desc|rating
-// ?minPrice=  ?maxPrice=  ?page=  ?limit=  ?slug=  ?brand=
-// ?bestSeller=true  ?newArrival=true  ?onSale=true
+/*
+=====================================================
+HELPERS
+=====================================================
+*/
+
+/*
+Safely convert FormData boolean values.
+*/
+function parseBool(value, fallback = false) {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  return String(value).toLowerCase() === "true";
+}
+
+/*
+Get files safely from a multer upload.fields() request.
+*/
+function getFiles(req, fieldName) {
+  if (!req.files || !req.files[fieldName]) {
+    return [];
+  }
+
+  return Array.isArray(req.files[fieldName])
+    ? req.files[fieldName]
+    : [];
+}
+
+/*
+Convert uploaded image files into public local URLs.
+*/
+function getUploadedImages(req) {
+  return getFiles(req, "images").map(
+    (file) => `/uploads/custom/${file.filename}`
+  );
+}
+
+/*
+Convert uploaded video files into public local URLs.
+*/
+function getUploadedVideos(req) {
+  return getFiles(req, "videos").map(
+    (file) => `/uploads/custom/${file.filename}`
+  );
+}
+
+/*
+Backward compatibility for legacy upload.single("image")
+*/
+function getLegacyImage(req) {
+  const files = getFiles(req, "image");
+
+  if (!files.length) {
+    return null;
+  }
+
+  return `/uploads/custom/${files[0].filename}`;
+}
+
+/*
+Safely parse array sent through FormData (JSON strings or standard arrays).
+*/
+function parseArrayField(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  if (Array.isArray(value)) {
+    return value.filter(Boolean);
+  }
+
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed.filter(Boolean);
+      }
+    } catch (error) {
+      // Fallback: If it's a comma-separated string rather than JSON
+      return value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+  }
+
+  throw new ApiError(400, "Invalid media format array.");
+}
+
+/*
+Ensure array items are non-null and distinct.
+*/
+function uniqueArray(values) {
+  return [
+    ...new Set(
+      Array.isArray(values) ? values.filter(Boolean) : []
+    ),
+  ];
+}
+
+/*
+Get all images from a product record.
+*/
+function getProductImages(product) {
+  const images = Array.isArray(product.images)
+    ? [...product.images]
+    : [];
+
+  if (product.image && !images.includes(product.image)) {
+    images.unshift(product.image);
+  }
+
+  return uniqueArray(images);
+}
+
+/*
+Get all videos from a product record.
+*/
+function getProductVideos(product) {
+  return Array.isArray(product.videos)
+    ? uniqueArray(product.videos)
+    : [];
+}
+
+/*
+=====================================================
+GET PRODUCTS
+=====================================================
+*/
+
 const getProducts = asyncHandler(async (req, res) => {
   const db = readDB();
+
   let products = [...db.products];
 
   const {
@@ -73,6 +214,7 @@ const getProducts = asyncHandler(async (req, res) => {
 
   if (q) {
     const keyword = q.toLowerCase();
+
     products = products.filter(
       (p) =>
         (p.name || "").toLowerCase().includes(keyword) ||
@@ -94,18 +236,25 @@ const getProducts = asyncHandler(async (req, res) => {
     case "price_asc":
       products.sort((a, b) => a.price - b.price);
       break;
+
     case "price_desc":
       products.sort((a, b) => b.price - a.price);
       break;
+
     case "rating":
       products.sort((a, b) => (b.rating || 0) - (a.rating || 0));
       break;
+
     default:
       break;
   }
 
   const page = Math.max(Number(req.query.page) || 1, 1);
-  const limit = Math.min(Number(req.query.limit) || products.length, 200);
+  const limit = Math.min(
+    Number(req.query.limit) || products.length,
+    200
+  );
+
   const start = (page - 1) * limit;
   const paginated = products.slice(start, start + limit);
 
@@ -118,32 +267,60 @@ const getProducts = asyncHandler(async (req, res) => {
   });
 });
 
-// @route GET /api/products/brands
+/*
+=====================================================
+GET BRANDS
+=====================================================
+*/
+
 const getBrands = asyncHandler(async (req, res) => {
   const db = readDB();
+
   const brands = [
     ...new Set(db.products.map((p) => p.brand).filter(Boolean)),
   ].sort();
 
-  res.json({ success: true, brands });
+  res.json({
+    success: true,
+    brands,
+  });
 });
 
-// @route GET /api/products/:id
+/*
+=====================================================
+GET PRODUCT BY ID
+=====================================================
+*/
+
 const getProductById = asyncHandler(async (req, res) => {
   const db = readDB();
-  const product = db.products.find((p) => String(p.id) === req.params.id);
+
+  const product = db.products.find(
+    (p) => String(p.id) === req.params.id
+  );
 
   if (!product) {
     throw new ApiError(404, "Product not found.");
   }
 
-  res.json({ success: true, product });
+  res.json({
+    success: true,
+    product,
+  });
 });
 
-// @route GET /api/products/:id/related
+/*
+=====================================================
+GET RELATED PRODUCTS
+=====================================================
+*/
+
 const getRelatedProducts = asyncHandler(async (req, res) => {
   const db = readDB();
-  const product = db.products.find((p) => String(p.id) === req.params.id);
+
+  const product = db.products.find(
+    (p) => String(p.id) === req.params.id
+  );
 
   if (!product) {
     throw new ApiError(404, "Product not found.");
@@ -157,15 +334,18 @@ const getRelatedProducts = asyncHandler(async (req, res) => {
     )
     .slice(0, 8);
 
-  res.json({ success: true, products: related });
+  res.json({
+    success: true,
+    products: related,
+  });
 });
 
-function parseBool(value, fallback = false) {
-  if (value === undefined) return fallback;
-  return value === true || value === "true";
-}
+/*
+=====================================================
+CREATE PRODUCT
+=====================================================
+*/
 
-// @route POST /api/products  (admin only)
 const createProduct = asyncHandler(async (req, res) => {
   const {
     name,
@@ -183,10 +363,7 @@ const createProduct = asyncHandler(async (req, res) => {
   } = req.body;
 
   if (!name || !category || !slug || !price) {
-    throw new ApiError(
-      400,
-      "name, category, slug and price are required."
-    );
+    throw new ApiError(400, "name, category, slug and price are required.");
   }
 
   if (!VALID_SLUGS.includes(slug)) {
@@ -210,9 +387,22 @@ const createProduct = asyncHandler(async (req, res) => {
           .filter(Boolean);
   }
 
-  const image = req.file
-    ? `/uploads/custom/${req.file.filename}`
-    : req.body.image || null;
+  // Uploaded media processing
+  let images = getUploadedImages(req);
+  const legacyImage = getLegacyImage(req);
+
+  if (legacyImage && !images.includes(legacyImage)) {
+    images.unshift(legacyImage);
+  }
+
+  if (req.body.image && !images.includes(req.body.image)) {
+    images.unshift(req.body.image);
+  }
+
+  images = uniqueArray(images);
+  const primaryImage = images.length > 0 ? images[0] : null;
+
+  const videos = uniqueArray(getUploadedVideos(req));
 
   const db = readDB();
 
@@ -232,20 +422,33 @@ const createProduct = asyncHandler(async (req, res) => {
     stock: stock ? Number(stock) : 20,
     isBestSeller: parseBool(isBestSeller),
     isNewArrival: parseBool(isNewArrival),
-    image,
+    image: primaryImage,
+    images,
+    videos,
     createdAt: new Date().toISOString(),
   };
 
   db.products.unshift(newProduct);
   writeDB(db);
 
-  res.status(201).json({ success: true, product: newProduct });
+  res.status(201).json({
+    success: true,
+    product: newProduct,
+  });
 });
 
-// @route PUT /api/products/:id  (admin only)
+/*
+=====================================================
+UPDATE PRODUCT
+=====================================================
+*/
+
 const updateProduct = asyncHandler(async (req, res) => {
   const db = readDB();
-  const product = db.products.find((p) => p.id === req.params.id);
+
+  const product = db.products.find(
+    (p) => String(p.id) === req.params.id
+  );
 
   if (!product) {
     throw new ApiError(404, "Product not found.");
@@ -273,25 +476,30 @@ const updateProduct = asyncHandler(async (req, res) => {
     );
   }
 
-  if (name) product.name = name;
-  if (brand) product.brand = brand;
-  if (category) product.category = category;
-  if (slug) product.slug = slug;
-  if (type !== undefined) product.type = type;
-  if (description !== undefined) product.description = description;
-  if (price) product.price = Number(price);
-  if (oldPrice !== undefined) {
-    product.oldPrice = oldPrice ? Number(oldPrice) : null;
-  }
-  if (stock !== undefined) product.stock = Number(stock);
-  if (isBestSeller !== undefined) {
-    product.isBestSeller = parseBool(isBestSeller);
-  }
-  if (isNewArrival !== undefined) {
-    product.isNewArrival = parseBool(isNewArrival);
+  if (category && !["Men", "Women"].includes(category)) {
+    throw new ApiError(400, 'category must be "Men" or "Women".');
   }
 
-  if (sizes) {
+  if (name !== undefined) product.name = name;
+  if (brand !== undefined) product.brand = brand;
+  if (category !== undefined) product.category = category;
+  if (slug !== undefined) product.slug = slug;
+  if (type !== undefined) product.type = type;
+  if (description !== undefined) product.description = description;
+
+  if (price !== undefined && price !== "") {
+    product.price = Number(price);
+  }
+
+  if (oldPrice !== undefined) {
+    product.oldPrice = oldPrice === "" ? null : Number(oldPrice);
+  }
+
+  if (stock !== undefined && stock !== "") {
+    product.stock = Number(stock);
+  }
+
+  if (sizes !== undefined && sizes !== "") {
     product.sizes = Array.isArray(sizes)
       ? sizes
       : String(sizes)
@@ -300,31 +508,105 @@ const updateProduct = asyncHandler(async (req, res) => {
           .filter(Boolean);
   }
 
-  if (req.file) {
-    product.image = `/uploads/custom/${req.file.filename}`;
-  } else if (req.body.image) {
-    product.image = req.body.image;
+  if (isBestSeller !== undefined) {
+    product.isBestSeller = parseBool(isBestSeller);
   }
+
+  if (isNewArrival !== undefined) {
+    product.isNewArrival = parseBool(isNewArrival);
+  }
+
+  /*
+  ---------------------------------------------------
+  EXISTING IMAGES RETENTION
+  ---------------------------------------------------
+  */
+  let finalImages = getProductImages(product);
+
+  if (req.body.existingImages !== undefined) {
+    const parsed = parseArrayField(req.body.existingImages);
+    finalImages = Array.isArray(parsed) ? parsed : [];
+  }
+
+  /*
+  ---------------------------------------------------
+  EXISTING VIDEOS RETENTION
+  ---------------------------------------------------
+  */
+  let finalVideos = getProductVideos(product);
+
+  if (req.body.existingVideos !== undefined) {
+    const parsed = parseArrayField(req.body.existingVideos);
+    finalVideos = Array.isArray(parsed) ? parsed : [];
+  }
+
+  /*
+  ---------------------------------------------------
+  NEW UPLOADED MEDIA ATTACHMENT
+  ---------------------------------------------------
+  */
+  const newImages = getUploadedImages(req);
+  const legacyImage = getLegacyImage(req);
+
+  if (legacyImage && !newImages.includes(legacyImage)) {
+    newImages.unshift(legacyImage);
+  }
+
+  finalImages = uniqueArray([...finalImages, ...newImages]);
+
+  const newVideos = getUploadedVideos(req);
+  finalVideos = uniqueArray([...finalVideos, ...newVideos]);
+
+  if (finalImages.length === 0 && req.body.image) {
+    finalImages = [req.body.image];
+  }
+
+  product.images = finalImages;
+  product.image = finalImages.length > 0 ? finalImages[0] : null;
+  product.videos = finalVideos;
 
   writeDB(db);
 
-  res.json({ success: true, product });
+  res.json({
+    success: true,
+    product,
+  });
 });
 
-// @route DELETE /api/products/:id  (admin only)
+/*
+=====================================================
+DELETE PRODUCT
+=====================================================
+*/
+
 const deleteProduct = asyncHandler(async (req, res) => {
   const db = readDB();
-  const exists = db.products.some((p) => p.id === req.params.id);
 
-  if (!exists) {
+  const product = db.products.find(
+    (p) => String(p.id) === req.params.id
+  );
+
+  if (!product) {
     throw new ApiError(404, "Product not found.");
   }
 
-  db.products = db.products.filter((p) => p.id !== req.params.id);
+  db.products = db.products.filter(
+    (p) => String(p.id) !== req.params.id
+  );
+
   writeDB(db);
 
-  res.json({ success: true, message: "Product deleted." });
+  res.json({
+    success: true,
+    message: "Product deleted successfully.",
+  });
 });
+
+/*
+=====================================================
+EXPORTS
+=====================================================
+*/
 
 module.exports = {
   getProducts,
