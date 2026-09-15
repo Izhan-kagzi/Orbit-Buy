@@ -30,6 +30,10 @@ const normalizeImages = (images) => {
   ];
 };
 
+/* ------------------------------------------------------------
+   Uploaded images
+------------------------------------------------------------ */
+
 const getUploadedImages = (req) => {
   if (!req.files || !Array.isArray(req.files)) {
     return [];
@@ -40,14 +44,22 @@ const getUploadedImages = (req) => {
   );
 };
 
-const getFlashSale = (db) => {
+/* ------------------------------------------------------------
+   Get / initialize Flash Sale from DB
+------------------------------------------------------------ */
+
+const ensureFlashSale = (db) => {
   if (!db.flashSale || typeof db.flashSale !== "object") {
     db.flashSale = {
       ...DEFAULT_FLASH_SALE,
     };
   }
 
-  db.flashSale.images = normalizeImages(db.flashSale.images);
+  db.flashSale = {
+    ...DEFAULT_FLASH_SALE,
+    ...db.flashSale,
+    images: normalizeImages(db.flashSale.images),
+  };
 
   return db.flashSale;
 };
@@ -60,7 +72,7 @@ const getFlashSale = (db) => {
 const getFlashSale = asyncHandler(async (req, res) => {
   const db = readDB();
 
-  const flashSale = getFlashSale(db);
+  const flashSale = ensureFlashSale(db);
 
   const now = Date.now();
 
@@ -75,15 +87,9 @@ const getFlashSale = asyncHandler(async (req, res) => {
   let status = "inactive";
 
   if (flashSale.active) {
-    if (
-      startTime &&
-      now < startTime
-    ) {
+    if (startTime && now < startTime) {
       status = "upcoming";
-    } else if (
-      endTime &&
-      now >= endTime
-    ) {
+    } else if (endTime && now >= endTime) {
       status = "ended";
     } else {
       status = "active";
@@ -92,6 +98,7 @@ const getFlashSale = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
+
     flashSale: {
       ...flashSale,
       status,
@@ -108,7 +115,7 @@ const getFlashSale = asyncHandler(async (req, res) => {
 const updateFlashSale = asyncHandler(async (req, res) => {
   const db = readDB();
 
-  const currentSale = getFlashSale(db);
+  const currentSale = ensureFlashSale(db);
 
   const {
     title,
@@ -120,7 +127,7 @@ const updateFlashSale = asyncHandler(async (req, res) => {
   } = req.body;
 
   /* ----------------------------------------------------------
-     Validate dates
+     Validate start time
   ---------------------------------------------------------- */
 
   let normalizedStartTime = currentSale.startTime;
@@ -143,6 +150,10 @@ const updateFlashSale = asyncHandler(async (req, res) => {
     }
   }
 
+  /* ----------------------------------------------------------
+     Validate end time
+  ---------------------------------------------------------- */
+
   if (endTime !== undefined) {
     if (endTime === "" || endTime === null) {
       normalizedEndTime = null;
@@ -160,10 +171,11 @@ const updateFlashSale = asyncHandler(async (req, res) => {
     }
   }
 
-  if (
-    normalizedStartTime &&
-    normalizedEndTime
-  ) {
+  /* ----------------------------------------------------------
+     Validate date order
+  ---------------------------------------------------------- */
+
+  if (normalizedStartTime && normalizedEndTime) {
     const start = new Date(normalizedStartTime).getTime();
     const end = new Date(normalizedEndTime).getTime();
 
@@ -209,7 +221,18 @@ const updateFlashSale = asyncHandler(async (req, res) => {
   ]);
 
   /* ----------------------------------------------------------
-     Update database
+     Active value
+  ---------------------------------------------------------- */
+
+  const normalizedActive =
+    active !== undefined
+      ? active === true ||
+        active === "true" ||
+        active === "1"
+      : currentSale.active;
+
+  /* ----------------------------------------------------------
+     Update DB
   ---------------------------------------------------------- */
 
   const updatedSale = {
@@ -231,12 +254,7 @@ const updateFlashSale = asyncHandler(async (req, res) => {
 
     endTime: normalizedEndTime,
 
-    active:
-      active !== undefined
-        ? active === true ||
-          active === "true" ||
-          active === "1"
-        : currentSale.active,
+    active: normalizedActive,
 
     updatedAt: new Date().toISOString(),
 
@@ -253,15 +271,53 @@ const updateFlashSale = asyncHandler(async (req, res) => {
 
   writeDB(db);
 
+  /* ----------------------------------------------------------
+     Calculate current status for response
+  ---------------------------------------------------------- */
+
+  const now = Date.now();
+
+  const startTimestamp = updatedSale.startTime
+    ? new Date(updatedSale.startTime).getTime()
+    : null;
+
+  const endTimestamp = updatedSale.endTime
+    ? new Date(updatedSale.endTime).getTime()
+    : null;
+
+  let status = "inactive";
+
+  if (updatedSale.active) {
+    if (
+      startTimestamp &&
+      now < startTimestamp
+    ) {
+      status = "upcoming";
+    } else if (
+      endTimestamp &&
+      now >= endTimestamp
+    ) {
+      status = "ended";
+    } else {
+      status = "active";
+    }
+  }
+
   res.json({
     success: true,
+
     message: "Flash Sale updated successfully.",
-    flashSale: updatedSale,
+
+    flashSale: {
+      ...updatedSale,
+      status,
+      isRunning: status === "active",
+    },
   });
 });
 
 /* ============================================================
-   DELETE / RESET FLASH SALE
+   RESET FLASH SALE
    ADMIN + MANAGER
 ============================================================ */
 
@@ -270,7 +326,9 @@ const resetFlashSale = asyncHandler(async (req, res) => {
 
   db.flashSale = {
     ...DEFAULT_FLASH_SALE,
+
     updatedAt: new Date().toISOString(),
+
     updatedBy: req.user
       ? {
           id: req.user.id,
@@ -284,10 +342,20 @@ const resetFlashSale = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
+
     message: "Flash Sale reset successfully.",
-    flashSale: db.flashSale,
+
+    flashSale: {
+      ...db.flashSale,
+      status: "inactive",
+      isRunning: false,
+    },
   });
 });
+
+/* ============================================================
+   EXPORTS
+============================================================ */
 
 module.exports = {
   getFlashSale,
