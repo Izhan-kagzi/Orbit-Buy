@@ -15,13 +15,16 @@ const paymentRoutes = require("./routes/paymentRoutes");
 const userRoutes = require("./routes/userRoutes");
 const reviewRoutes = require("./routes/reviewRoutes");
 
-const { errorHandler, notFound } = require("./middleware/errorHandler");
+const {
+  errorHandler,
+  notFound,
+} = require("./middleware/errorHandler");
 
 const app = express();
 
-/* ============================================================
-   CORS
-============================================================ */
+// ============================================================
+// CORS
+// ============================================================
 
 const defaultOrigins = [
   "http://localhost:5173",
@@ -45,6 +48,8 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: (origin, callback) => {
+      // Allow requests without an Origin header
+      // such as Postman and server-to-server requests.
       if (!origin) {
         return callback(null, true);
       }
@@ -78,15 +83,15 @@ app.use(
   })
 );
 
-/* ============================================================
-   BODY PARSER
-============================================================ */
+// ============================================================
+// BODY PARSER
+// ============================================================
 
 app.use(express.json());
 
-/* ============================================================
-   STATIC UPLOADS
-============================================================ */
+// ============================================================
+// STATIC UPLOADS
+// ============================================================
 
 app.use(
   "/uploads",
@@ -100,17 +105,17 @@ app.use(
   )
 );
 
-/* ============================================================
-   LOGGER
-============================================================ */
+// ============================================================
+// LOGGER
+// ============================================================
 
 if (process.env.NODE_ENV !== "test") {
   app.use(morgan("dev"));
 }
 
-/* ============================================================
-   HEALTH CHECK
-============================================================ */
+// ============================================================
+// HEALTH CHECK
+// ============================================================
 
 app.get("/api/health", (req, res) => {
   res.json({
@@ -119,42 +124,80 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-/* ============================================================
-   API ROUTES
-============================================================ */
+// ============================================================
+// API ROUTES
+// ============================================================
 
-app.use("/api/auth", authRoutes);
+app.use(
+  "/api/auth",
+  authRoutes
+);
 
-app.use("/api/products", productRoutes);
+app.use(
+  "/api/products",
+  productRoutes
+);
 
-app.use("/api/flash-sale", flashSaleRoutes);
+app.use(
+  "/api/flash-sale",
+  flashSaleRoutes
+);
 
-app.use("/api/cart", cartRoutes);
+app.use(
+  "/api/cart",
+  cartRoutes
+);
 
-app.use("/api/wishlist", wishlistRoutes);
+app.use(
+  "/api/wishlist",
+  wishlistRoutes
+);
 
-app.use("/api/orders", orderRoutes);
+app.use(
+  "/api/orders",
+  orderRoutes
+);
 
-app.use("/api/coupons", couponRoutes);
+app.use(
+  "/api/coupons",
+  couponRoutes
+);
 
-app.use("/api/ai", aiRoutes);
+app.use(
+  "/api/ai",
+  aiRoutes
+);
 
-app.use("/api/payments", paymentRoutes);
+app.use(
+  "/api/payments",
+  paymentRoutes
+);
 
-app.use("/api/users", userRoutes);
+app.use(
+  "/api/users",
+  userRoutes
+);
 
-/* ============================================================
-   REVIEWS
-============================================================ */
+// ============================================================
+// REVIEWS
+// Public product reviews + Admin/Manager review management
+// ============================================================
 
-app.use("/api/reviews", reviewRoutes);
+app.use(
+  "/api/reviews",
+  reviewRoutes
+);
 
-/* ============================================================
-   404 + ERROR HANDLING
-============================================================ */
+// ============================================================
+// 404 + ERROR HANDLING
+// ============================================================
 
 app.use(notFound);
 
 app.use(errorHandler);
+
+// ============================================================
+// EXPORT APP
+// ============================================================
 
 module.exports = app;

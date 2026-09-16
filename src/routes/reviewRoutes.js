@@ -17,6 +17,8 @@ function ensureReviews(db) {
 }
 
 function getProduct(db, productId) {
+  if (!Array.isArray(db.products)) return null;
+
   return db.products.find(
     (product) => String(product.id) === String(productId)
   );
@@ -68,7 +70,7 @@ function updateProductReviewStats(db, productId) {
   const reviews = ensureReviews(db).filter(
     (review) =>
       String(review.productId) === String(productId) &&
-      review.status !== "deleted"
+      review.status === "approved"
   );
 
   product.reviews = reviews.length;
@@ -105,9 +107,8 @@ const getProductReviews = asyncHandler(async (req, res) => {
     .filter(
       (review) =>
         String(review.productId) === String(req.params.productId) &&
-        review.status !== "deleted"
+        review.status === "approved"
     )
-    .filter((review) => review.status !== "pending")
     .sort(
       (a, b) =>
         new Date(b.createdAt || 0) -
@@ -354,11 +355,11 @@ const replyToReview = asyncHandler(async (req, res) => {
   review.reply = {
     text,
 
-    authorId: req.user.id,
+    authorId: req.user?.id || null,
 
-    authorName: req.user.name || "Orbit Buy",
+    authorName: req.user?.name || "Orbit Buy",
 
-    authorRole: req.user.role || "manager",
+    authorRole: req.user?.role || "manager",
 
     createdAt:
       review.reply?.createdAt || now,
