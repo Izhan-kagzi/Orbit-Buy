@@ -13,7 +13,14 @@ const couponRoutes = require("./routes/couponRoutes");
 const aiRoutes = require("./routes/aiRoutes");
 const paymentRoutes = require("./routes/paymentRoutes");
 const userRoutes = require("./routes/userRoutes");
-const { errorHandler, notFound } = require("./middleware/errorHandler");
+
+// Review routes
+const reviewRoutes = require("./routes/reviewRoutes");
+
+const {
+  errorHandler,
+  notFound,
+} = require("./middleware/errorHandler");
 
 const app = express();
 
@@ -53,12 +60,30 @@ app.use(
         return callback(null, true);
       }
 
-      console.warn(`CORS blocked origin: ${origin}`);
-      return callback(new Error("Not allowed by CORS"));
+      console.warn(
+        `CORS blocked origin: ${origin}`
+      );
+
+      return callback(
+        new Error("Not allowed by CORS")
+      );
     },
+
     credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+
+    methods: [
+      "GET",
+      "POST",
+      "PUT",
+      "PATCH",
+      "DELETE",
+      "OPTIONS",
+    ],
+
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+    ],
   })
 );
 
@@ -74,14 +99,23 @@ app.use(express.json());
 
 app.use(
   "/uploads",
-  express.static(path.join(__dirname, "..", "public", "uploads"))
+  express.static(
+    path.join(
+      __dirname,
+      "..",
+      "public",
+      "uploads"
+    )
+  )
 );
 
 // --------------------------------------------------
 // Logger
 // --------------------------------------------------
 
-if (process.env.NODE_ENV !== "test") {
+if (
+  process.env.NODE_ENV !== "test"
+) {
   app.use(morgan("dev"));
 }
 
@@ -89,34 +123,88 @@ if (process.env.NODE_ENV !== "test") {
 // Health check
 // --------------------------------------------------
 
-app.get("/api/health", (req, res) => {
-  res.json({
-    success: true,
-    message: "Orbit Buy API is running.",
-  });
-});
+app.get(
+  "/api/health",
+  (req, res) => {
+    res.json({
+      success: true,
+      message:
+        "Orbit Buy API is running.",
+    });
+  }
+);
 
 // --------------------------------------------------
 // API Routes
 // --------------------------------------------------
 
-app.use("/api/auth", authRoutes);
-app.use("/api/products", productRoutes);
-app.use("/api/flash-sale", flashSaleRoutes);
-app.use("/api/cart", cartRoutes);
-app.use("/api/wishlist", wishlistRoutes);
-app.use("/api/orders", orderRoutes);
-app.use("/api/coupons", couponRoutes);
-app.use("/api/ai", aiRoutes);
-app.use("/api/payments", paymentRoutes);
-app.use("/api/users", userRoutes);
+app.use(
+  "/api/auth",
+  authRoutes
+);
 
+app.use(
+  "/api/products",
+  productRoutes
+);
+
+app.use(
+  "/api/flash-sale",
+  flashSaleRoutes
+);
+
+app.use(
+  "/api/cart",
+  cartRoutes
+);
+
+app.use(
+  "/api/wishlist",
+  wishlistRoutes
+);
+
+app.use(
+  "/api/orders",
+  orderRoutes
+);
+
+app.use(
+  "/api/coupons",
+  couponRoutes
+);
+
+app.use(
+  "/api/ai",
+  aiRoutes
+);
+
+app.use(
+  "/api/payments",
+  paymentRoutes
+);
+
+app.use(
+  "/api/users",
+  userRoutes
+);
+
+// --------------------------------------------------
+// Review Routes
+// Public product reviews + customer reviews +
+// Admin/Manager review management
+// --------------------------------------------------
+
+app.use(
+  "/api/reviews",
+  reviewRoutes
+);
 
 // --------------------------------------------------
 // 404 + Error handling
 // --------------------------------------------------
 
 app.use(notFound);
+
 app.use(errorHandler);
 
 module.exports = app;
