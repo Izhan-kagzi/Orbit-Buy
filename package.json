@@ -1,7 +1,7 @@
 {
   "name": "orbit-buy-backend",
   "version": "1.0.0",
-  "description": "REST API backend for Orbit Buy \u2014 auth, products, cart, wishlist, orders, coupons",
+  "description": "REST API backend for Orbit Buy — auth, products, cart, wishlist, orders, coupons",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -17,6 +17,7 @@
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
     "multer": "^2.0.1",
+    "mysql2": "^3.24.4",
     "stripe": "^22.4.0"
   },
   "devDependencies": {
