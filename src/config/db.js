@@ -1,142 +1,66 @@
-const fs = require("fs");
-const path = require("path");
-
-const DB_PATH = path.join(__dirname, "..", "data", "db.json");
-const SEED_PRODUCTS_PATH = path.join(
-  __dirname,
-  "..",
-  "data",
-  "products.seed.json"
-);
+const mongoose = require("mongoose");
 
 /**
- * This project uses a lightweight JSON-file "database" instead of
- * MongoDB/Postgres so the whole backend runs with zero external
- * services or network access — clone it, `npm install`, `npm start`,
- * done. The data-access shape (find/insert/update/delete by id) is
- * intentionally database-agnostic, so swapping this file out for a
- * real Mongoose/Prisma layer later only touches this one module.
+ * MongoDB connection.
+ *
+ * The project previously used a db.json file as its "database". Every
+ * collection that lived in that file now has a real Mongoose model in
+ * src/models, and the old JSON file is only kept around as a one-time
+ * migration source (see src/scripts/migrate.js).
  */
 
-function defaultData() {
-  let products = [];
+const MONGO_URI =
+  process.env.MONGO_URI ||
+  process.env.MONGODB_URI ||
+  "mongodb://127.0.0.1:27017/orbit_buy";
 
-  try {
-    products = JSON.parse(
-      fs.readFileSync(SEED_PRODUCTS_PATH, "utf-8")
-    );
-  } catch (error) {
-    console.error("Failed to load seed products:", error.message);
-  }
+// Fail fast instead of buffering queries forever when Mongo is down.
+mongoose.set("strictQuery", true);
+mongoose.set("bufferCommands", false);
 
-  const adminId = "admin-seed-user-0001";
-  const now = new Date();
-  const farFuture = new Date(now.getFullYear() + 2, 0, 1).toISOString();
-  const startOfThisYear = new Date(now.getFullYear(), 0, 1).toISOString();
+let connectionPromise = null;
 
-  return {
-    users: [
-      {
-        id: adminId,
-        name: "Orbit Buy Admin",
-        email: "admin@orbitbuy.com",
-        // password: Admin@123 (change this after first login in production)
-        password:
-          "$2a$10$sgube0S/kZAtfukcdz4j2evwCpQJL3ZCi7FxSTKxG.AMi4IFK9SIK",
-        mobile: "",
-        role: "admin",
-        createdAt: new Date().toISOString(),
-      },
-    ],
-    products,
-    carts: { [adminId]: [] }, // userId -> [{ productId, quantity }]
-    wishlists: { [adminId]: [] }, // userId -> [productId]
-    orders: [], // { id, userId, items, ... }
-    coupons: [
-      {
-        id: "coupon-welcome10",
-        code: "WELCOME10",
-        discountType: "flat",
-        discountValue: 100,
-        startDate: startOfThisYear,
-        endDate: farFuture,
-        active: true,
-        createdAt: new Date().toISOString(),
-      },
-      {
-        id: "coupon-save20",
-        code: "SAVE20",
-        discountType: "flat",
-        discountValue: 200,
-        startDate: startOfThisYear,
-        endDate: farFuture,
-        active: true,
-        createdAt: new Date().toISOString(),
-      },
-      {
-        id: "coupon-orbit50",
-        code: "ORBIT50",
-        discountType: "flat",
-        discountValue: 500,
-        startDate: startOfThisYear,
-        endDate: farFuture,
-        active: true,
-        createdAt: new Date().toISOString(),
-      },
-    ],
-  };
+async function connectDB() {
+  if (connectionPromise) return connectionPromise;
+
+  connectionPromise = mongoose
+    .connect(MONGO_URI, {
+      serverSelectionTimeoutMS: 10000,
+      maxPoolSize: 10,
+    })
+    .then((conn) => {
+      console.log(
+        `✅ MongoDB connected: ${conn.connection.host}/${conn.connection.name}`
+      );
+      return conn;
+    })
+    .catch((error) => {
+      connectionPromise = null;
+      console.error("❌ MongoDB connection failed:", error.message);
+      console.error(
+        "   Check that MongoDB is running and MONGO_URI in backend/.env is correct."
+      );
+      throw error;
+    });
+
+  return connectionPromise;
 }
 
-// Backfills any keys missing from an older db.json (e.g. after an
-// update adds a new top-level collection like `coupons`) so existing
-// installs don't crash on read.
-function ensureShape(data) {
-  const fallback = defaultData();
+mongoose.connection.on("disconnected", () => {
+  console.warn("⚠️  MongoDB disconnected.");
+});
 
-  let changed = false;
+mongoose.connection.on("reconnected", () => {
+  console.log("✅ MongoDB reconnected.");
+});
 
-  for (const key of Object.keys(fallback)) {
-    if (data[key] === undefined) {
-      // Don't reseed products/users/orders if they already diverged —
-      // only fill in genuinely missing collections.
-      data[key] = key === "products" ? fallback.products : fallback[key];
-      changed = true;
-    }
-  }
-
-  return { data, changed };
+async function disconnectDB() {
+  connectionPromise = null;
+  await mongoose.connection.close();
 }
 
-function readDB() {
-  if (!fs.existsSync(DB_PATH)) {
-    const initial = defaultData();
-    fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2));
-    return initial;
-  }
-
-  try {
-    const raw = fs.readFileSync(DB_PATH, "utf-8");
-    const parsed = JSON.parse(raw);
-
-    const { data, changed } = ensureShape(parsed);
-    if (changed) {
-      fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
-    }
-
-    return data;
-  } catch (error) {
-    console.error(
-      "Failed to read db.json, reinitializing:",
-      error.message
-    );
-    const initial = defaultData();
-    fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2));
-    return initial;
-  }
+function isConnected() {
+  return mongoose.connection.readyState === 1;
 }
 
-function writeDB(data) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
-}
-
-module.exports = { readDB, writeDB };
+module.exports = { connectDB, disconnectDB, isConnected, mongoose, MONGO_URI };

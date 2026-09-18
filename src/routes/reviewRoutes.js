@@ -4,86 +4,59 @@ const {
   getProductReviews,
   getAllReviews,
   createReview,
+  updateMyReview,
   replyToReview,
   deleteReply,
   deleteReview,
   approveReview,
 } = require("../controllers/reviewController");
 
-const {
-  protect,
-  staffOnly,
-} = require("../middleware/auth");
+const { protect, staffOnly, optionalAuth } = require("../middleware/auth");
 
 const router = express.Router();
 
-// ============================================================
-// PUBLIC
-// ============================================================
-
-// GET /api/reviews/product/:productId
-router.get(
-  "/product/:productId",
-  getProductReviews
-);
-
-// ============================================================
-// CUSTOMER
-// ============================================================
-
-// POST /api/reviews
-router.post(
-  "/",
-  protect,
-  createReview
-);
-
-// ============================================================
-// ADMIN / MANAGER
-// ============================================================
+/* ============================================================
+   ADMIN / MANAGER — list every review
+   (declared before "/:id" style routes so it isn't shadowed)
+============================================================ */
 
 // GET /api/reviews
-router.get(
-  "/",
-  protect,
-  staffOnly,
-  getAllReviews
-);
+router.get("/", protect, staffOnly, getAllReviews);
 
-// PUT /api/reviews/:id/reply
-router.put(
-  "/:id/reply",
-  protect,
-  staffOnly,
-  replyToReview
-);
+/* ============================================================
+   PUBLIC
+============================================================ */
 
-// DELETE /api/reviews/:id/reply
-router.delete(
-  "/:id/reply",
-  protect,
-  staffOnly,
-  deleteReply
-);
+// GET /api/reviews/product/:productId
+router.get("/product/:productId", optionalAuth, getProductReviews);
 
-// PUT /api/reviews/:id/approve
-router.put(
-  "/:id/approve",
-  protect,
-  staffOnly,
-  approveReview
-);
+/* ============================================================
+   CUSTOMER
+============================================================ */
 
-// DELETE /api/reviews/:id
-router.delete(
-  "/:id",
-  protect,
-  staffOnly,
-  deleteReview
-);
+// POST /api/reviews
+router.post("/", protect, createReview);
 
-// ============================================================
-// EXPORT
-// ============================================================
+// PUT /api/reviews/:id  — edit your own review
+router.put("/:id", protect, updateMyReview);
+
+/* ============================================================
+   ADMIN / MANAGER — reply, approve, delete
+============================================================ */
+
+// Reply to a customer review (PUT and POST both accepted).
+router.put("/:id/reply", protect, staffOnly, replyToReview);
+router.post("/:id/reply", protect, staffOnly, replyToReview);
+
+// Remove a staff reply.
+router.delete("/:id/reply", protect, staffOnly, deleteReply);
+
+// Approve / unapprove a review.
+router.put("/:id/approve", protect, staffOnly, approveReview);
+router.patch("/:id/approve", protect, staffOnly, approveReview);
+
+// DELETE /api/reviews/:id — staff can delete any review,
+// a customer can delete their own.
+router.delete("/:id", protect, deleteReview);
 
 module.exports = router;

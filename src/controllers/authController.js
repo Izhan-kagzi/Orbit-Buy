@@ -1,17 +1,13 @@
 const bcrypt = require("bcryptjs");
-const crypto = require("crypto");
 
-const { readDB, writeDB } = require("../config/db");
+const User = require("../models/User");
+const Cart = require("../models/Cart");
+const Wishlist = require("../models/Wishlist");
 const { signToken } = require("../utils/jwt");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-function sanitizeUser(user) {
-  const { password, ...safe } = user;
-  return safe;
-}
 
 // @route POST /api/auth/register
 const register = asyncHandler(async (req, res) => {
@@ -25,46 +21,39 @@ const register = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Please enter a valid email address.");
   }
 
-  if (password.length < 6) {
-    throw new ApiError(
-      400,
-      "Password must be at least 6 characters long."
-    );
+  if (String(password).length < 6) {
+    throw new ApiError(400, "Password must be at least 6 characters long.");
   }
 
-  const db = readDB();
+  const normalizedEmail = String(email).toLowerCase().trim();
 
-  const existing = db.users.find(
-    (u) => u.email.toLowerCase() === email.toLowerCase()
-  );
-
+  const existing = await User.findOne({ email: normalizedEmail }).lean();
   if (existing) {
     throw new ApiError(409, "An account with this email already exists.");
   }
 
   const hashedPassword = await bcrypt.hash(password, 10);
 
-  const newUser = {
-    id: crypto.randomUUID(),
-    name,
-    email: email.toLowerCase(),
+  const user = await User.create({
+    name: String(name).trim(),
+    email: normalizedEmail,
     password: hashedPassword,
     mobile: mobile || "",
     role: "customer",
-    createdAt: new Date().toISOString(),
-  };
+  });
 
-  db.users.push(newUser);
-  db.carts[newUser.id] = [];
-  db.wishlists[newUser.id] = [];
-  writeDB(db);
+  // Give every new account an empty cart and wishlist up front.
+  await Promise.all([
+    Cart.create({ user: user._id, items: [] }),
+    Wishlist.create({ user: user._id, products: [] }),
+  ]);
 
-  const token = signToken({ id: newUser.id });
+  const token = signToken({ id: user._id });
 
   res.status(201).json({
     success: true,
     token,
-    user: sanitizeUser(newUser),
+    user: user.toJSON(),
   });
 });
 
@@ -76,11 +65,10 @@ const login = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Email and password are required.");
   }
 
-  const db = readDB();
-
-  const user = db.users.find(
-    (u) => u.email.toLowerCase() === email.toLowerCase()
-  );
+  // password has select:false on the schema, so ask for it explicitly.
+  const user = await User.findOne({
+    email: String(email).toLowerCase().trim(),
+  }).select("+password");
 
   if (!user) {
     throw new ApiError(401, "Invalid email or password.");
@@ -92,44 +80,77 @@ const login = asyncHandler(async (req, res) => {
     throw new ApiError(401, "Invalid email or password.");
   }
 
-  const token = signToken({ id: user.id });
+  const token = signToken({ id: user._id });
 
   res.json({
     success: true,
     token,
-    user: sanitizeUser(user),
+    user: user.toJSON(),
   });
 });
 
 // @route GET /api/auth/me
 const getMe = asyncHandler(async (req, res) => {
-  const db = readDB();
-  const user = db.users.find((u) => u.id === req.user.id);
+  const user = await User.findById(req.user.id);
 
   if (!user) {
     throw new ApiError(404, "User not found.");
   }
 
-  res.json({ success: true, user: sanitizeUser(user) });
+  res.json({ success: true, user: user.toJSON() });
 });
 
 // @route PUT /api/auth/me
 const updateMe = asyncHandler(async (req, res) => {
   const { name, mobile } = req.body;
 
-  const db = readDB();
-  const user = db.users.find((u) => u.id === req.user.id);
+  const user = await User.findById(req.user.id);
 
   if (!user) {
     throw new ApiError(404, "User not found.");
   }
 
-  if (name) user.name = name;
-  if (mobile !== undefined) user.mobile = mobile;
+  if (name !== undefined && String(name).trim()) {
+    user.name = String(name).trim();
+  }
 
-  writeDB(db);
+  if (mobile !== undefined) {
+    user.mobile = String(mobile).trim();
+  }
 
-  res.json({ success: true, user: sanitizeUser(user) });
+  await user.save();
+
+  res.json({ success: true, user: user.toJSON() });
 });
 
-module.exports = { register, login, getMe, updateMe };
+// @route PUT /api/auth/password  { currentPassword, newPassword }
+const changePassword = asyncHandler(async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+
+  if (!currentPassword || !newPassword) {
+    throw new ApiError(400, "Current and new password are required.");
+  }
+
+  if (String(newPassword).length < 6) {
+    throw new ApiError(400, "New password must be at least 6 characters long.");
+  }
+
+  const user = await User.findById(req.user.id).select("+password");
+
+  if (!user) {
+    throw new ApiError(404, "User not found.");
+  }
+
+  const isMatch = await bcrypt.compare(currentPassword, user.password);
+
+  if (!isMatch) {
+    throw new ApiError(401, "Your current password is incorrect.");
+  }
+
+  user.password = await bcrypt.hash(newPassword, 10);
+  await user.save();
+
+  res.json({ success: true, message: "Password updated successfully." });
+});
+
+module.exports = { register, login, getMe, updateMe, changePassword };

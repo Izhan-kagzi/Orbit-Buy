@@ -1,32 +1,11 @@
-const crypto = require("crypto");
-
-const { readDB, writeDB } = require("../config/db");
+const Product = require("../models/Product");
+const Review = require("../models/Review");
+const Cart = require("../models/Cart");
+const Wishlist = require("../models/Wishlist");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
 
-/*
-=====================================================
-VALID PRODUCT SLUGS
-=====================================================
-*/
-
-const VALID_SLUGS = [
-  "mens-shirts",
-  "mens-tshirts",
-  "mens-jeans",
-  "mens-trackpants",
-  "mens-hoodies",
-  "mens-jackets",
-
-  "women-dresses",
-  "women-partywear",
-  "women-jeans",
-  "women-cordset",
-  "women-formals",
-  "women-skirts",
-  "women-shirts",
-  "women-jumpsuits",
-];
+const { VALID_SLUGS } = Product;
 
 /*
 =====================================================
@@ -34,85 +13,50 @@ HELPERS
 =====================================================
 */
 
-/*
-Safely convert FormData boolean values.
-*/
+/* Safely convert FormData boolean values. */
 function parseBool(value, fallback = false) {
-  if (value === undefined || value === null) {
-    return fallback;
-  }
-
-  if (typeof value === "boolean") {
-    return value;
-  }
-
-  return String(value).toLowerCase() === "true";
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  return ["true", "1", "yes", "on"].includes(String(value).toLowerCase());
 }
 
-/*
-Get files safely from a multer upload.fields() request.
-*/
+/* Get files safely from a multer upload.fields() request. */
 function getFiles(req, fieldName) {
-  if (!req.files || !req.files[fieldName]) {
-    return [];
-  }
-
-  return Array.isArray(req.files[fieldName])
-    ? req.files[fieldName]
-    : [];
+  if (!req.files || !req.files[fieldName]) return [];
+  return Array.isArray(req.files[fieldName]) ? req.files[fieldName] : [];
 }
 
-/*
-Convert uploaded image files into public local URLs.
-*/
 function getUploadedImages(req) {
   return getFiles(req, "images").map(
     (file) => `/uploads/custom/${file.filename}`
   );
 }
 
-/*
-Convert uploaded video files into public local URLs.
-*/
 function getUploadedVideos(req) {
   return getFiles(req, "videos").map(
     (file) => `/uploads/custom/${file.filename}`
   );
 }
 
-/*
-Backward compatibility for legacy upload.single("image")
-*/
+/* Backward compatibility for legacy upload.single("image") */
 function getLegacyImage(req) {
   const files = getFiles(req, "image");
-
-  if (!files.length) {
-    return null;
-  }
-
+  if (!files.length) return null;
   return `/uploads/custom/${files[0].filename}`;
 }
 
-/*
-Safely parse array sent through FormData (JSON strings or standard arrays).
-*/
+/* Safely parse an array sent through FormData (JSON string, CSV or array). */
 function parseArrayField(value) {
-  if (value === undefined || value === null || value === "") {
-    return null;
-  }
+  if (value === undefined || value === null || value === "") return null;
 
-  if (Array.isArray(value)) {
-    return value.filter(Boolean);
-  }
+  if (Array.isArray(value)) return value.filter(Boolean);
 
   if (typeof value === "string") {
     try {
       const parsed = JSON.parse(value);
-      if (Array.isArray(parsed)) {
-        return parsed.filter(Boolean);
-      }
+      if (Array.isArray(parsed)) return parsed.filter(Boolean);
+      return [String(parsed)].filter(Boolean);
     } catch (error) {
-      // Fallback: If it's a comma-separated string rather than JSON
       return value
         .split(",")
         .map((item) => item.trim())
@@ -120,27 +64,15 @@ function parseArrayField(value) {
     }
   }
 
-  throw new ApiError(400, "Invalid media format array.");
+  throw new ApiError(400, "Invalid media array format.");
 }
 
-/*
-Ensure array items are non-null and distinct.
-*/
 function uniqueArray(values) {
-  return [
-    ...new Set(
-      Array.isArray(values) ? values.filter(Boolean) : []
-    ),
-  ];
+  return [...new Set(Array.isArray(values) ? values.filter(Boolean) : [])];
 }
 
-/*
-Get all images from a product record.
-*/
 function getProductImages(product) {
-  const images = Array.isArray(product.images)
-    ? [...product.images]
-    : [];
+  const images = Array.isArray(product.images) ? [...product.images] : [];
 
   if (product.image && !images.includes(product.image)) {
     images.unshift(product.image);
@@ -149,26 +81,29 @@ function getProductImages(product) {
   return uniqueArray(images);
 }
 
-/*
-Get all videos from a product record.
-*/
 function getProductVideos(product) {
-  return Array.isArray(product.videos)
-    ? uniqueArray(product.videos)
-    : [];
+  return Array.isArray(product.videos) ? uniqueArray(product.videos) : [];
+}
+
+function parseSizes(sizes, fallback) {
+  if (sizes === undefined || sizes === "") return fallback;
+
+  if (Array.isArray(sizes)) return sizes.filter(Boolean);
+
+  return String(sizes)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /*
 =====================================================
 GET PRODUCTS
+GET /api/products
 =====================================================
 */
 
 const getProducts = asyncHandler(async (req, res) => {
-  const db = readDB();
-
-  let products = [...db.products];
-
   const {
     category,
     q,
@@ -182,90 +117,74 @@ const getProducts = asyncHandler(async (req, res) => {
     onSale,
   } = req.query;
 
-  if (slug) {
-    products = products.filter((p) => p.slug === slug);
-  }
+  const filter = {};
+
+  if (slug) filter.slug = slug;
 
   if (category && category !== "All") {
-    products = products.filter(
-      (p) => p.category?.toLowerCase() === category.toLowerCase()
-    );
+    filter.category = new RegExp(`^${escapeRegex(category)}$`, "i");
   }
 
   if (brand) {
-    products = products.filter(
-      (p) => (p.brand || "").toLowerCase() === brand.toLowerCase()
-    );
+    filter.brand = new RegExp(`^${escapeRegex(brand)}$`, "i");
   }
 
-  if (bestSeller === "true") {
-    products = products.filter((p) => p.isBestSeller);
-  }
-
-  if (newArrival === "true") {
-    products = products.filter((p) => p.isNewArrival);
-  }
+  if (bestSeller === "true") filter.isBestSeller = true;
+  if (newArrival === "true") filter.isNewArrival = true;
 
   if (onSale === "true") {
-    products = products.filter(
-      (p) => p.oldPrice && p.oldPrice > p.price
-    );
+    filter.$expr = { $gt: ["$oldPrice", "$price"] };
   }
 
   if (q) {
-    const keyword = q.toLowerCase();
-
-    products = products.filter(
-      (p) =>
-        (p.name || "").toLowerCase().includes(keyword) ||
-        (p.category || "").toLowerCase().includes(keyword) ||
-        (p.brand || "").toLowerCase().includes(keyword) ||
-        (p.type || "").toLowerCase().includes(keyword)
-    );
+    const keyword = new RegExp(escapeRegex(q), "i");
+    filter.$or = [
+      { name: keyword },
+      { category: keyword },
+      { brand: keyword },
+      { type: keyword },
+      { description: keyword },
+    ];
   }
 
-  if (minPrice) {
-    products = products.filter((p) => p.price >= Number(minPrice));
+  if (minPrice || maxPrice) {
+    filter.price = {};
+    if (minPrice) filter.price.$gte = Number(minPrice);
+    if (maxPrice) filter.price.$lte = Number(maxPrice);
   }
 
-  if (maxPrice) {
-    products = products.filter((p) => p.price <= Number(maxPrice));
-  }
+  const sortMap = {
+    price_asc: { price: 1 },
+    price_desc: { price: -1 },
+    rating: { rating: -1 },
+    newest: { createdAt: -1 },
+  };
 
-  switch (sort) {
-    case "price_asc":
-      products.sort((a, b) => a.price - b.price);
-      break;
+  const sortBy = sortMap[sort] || { createdAt: -1 };
 
-    case "price_desc":
-      products.sort((a, b) => b.price - a.price);
-      break;
-
-    case "rating":
-      products.sort((a, b) => (b.rating || 0) - (a.rating || 0));
-      break;
-
-    default:
-      break;
-  }
+  const total = await Product.countDocuments(filter);
 
   const page = Math.max(Number(req.query.page) || 1, 1);
-  const limit = Math.min(
-    Number(req.query.limit) || products.length,
-    200
-  );
+  const limit = Math.min(Number(req.query.limit) || total || 1, 200);
+  const skip = (page - 1) * limit;
 
-  const start = (page - 1) * limit;
-  const paginated = products.slice(start, start + limit);
+  const products = await Product.find(filter)
+    .sort(sortBy)
+    .skip(skip)
+    .limit(limit);
 
   res.json({
     success: true,
-    count: products.length,
+    count: total,
     page,
-    pages: Math.ceil(products.length / limit) || 1,
-    products: paginated,
+    pages: Math.ceil(total / limit) || 1,
+    products: products.map((p) => p.toJSON()),
   });
 });
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 /*
 =====================================================
@@ -274,16 +193,9 @@ GET BRANDS
 */
 
 const getBrands = asyncHandler(async (req, res) => {
-  const db = readDB();
+  const brands = (await Product.distinct("brand")).filter(Boolean).sort();
 
-  const brands = [
-    ...new Set(db.products.map((p) => p.brand).filter(Boolean)),
-  ].sort();
-
-  res.json({
-    success: true,
-    brands,
-  });
+  res.json({ success: true, brands });
 });
 
 /*
@@ -293,20 +205,13 @@ GET PRODUCT BY ID
 */
 
 const getProductById = asyncHandler(async (req, res) => {
-  const db = readDB();
-
-  const product = db.products.find(
-    (p) => String(p.id) === req.params.id
-  );
+  const product = await Product.findById(req.params.id);
 
   if (!product) {
     throw new ApiError(404, "Product not found.");
   }
 
-  res.json({
-    success: true,
-    product,
-  });
+  res.json({ success: true, product: product.toJSON() });
 });
 
 /*
@@ -316,33 +221,28 @@ GET RELATED PRODUCTS
 */
 
 const getRelatedProducts = asyncHandler(async (req, res) => {
-  const db = readDB();
-
-  const product = db.products.find(
-    (p) => String(p.id) === req.params.id
-  );
+  const product = await Product.findById(req.params.id).lean();
 
   if (!product) {
     throw new ApiError(404, "Product not found.");
   }
 
-  const related = db.products
-    .filter(
-      (p) =>
-        p.id !== product.id &&
-        (p.category === product.category || p.type === product.type)
-    )
-    .slice(0, 8);
+  const related = await Product.find({
+    _id: { $ne: product._id },
+    $or: [
+      { slug: product.slug },
+      { category: product.category },
+      ...(product.type ? [{ type: product.type }] : []),
+    ],
+  }).limit(8);
 
-  res.json({
-    success: true,
-    products: related,
-  });
+  res.json({ success: true, products: related.map((p) => p.toJSON()) });
 });
 
 /*
 =====================================================
 CREATE PRODUCT
+POST /api/products   (admin / manager)
 =====================================================
 */
 
@@ -362,29 +262,16 @@ const createProduct = asyncHandler(async (req, res) => {
     isNewArrival,
   } = req.body;
 
-  if (!name || !category || !slug || !price) {
+  if (!name || !category || !slug || price === undefined || price === "") {
     throw new ApiError(400, "name, category, slug and price are required.");
   }
 
   if (!VALID_SLUGS.includes(slug)) {
-    throw new ApiError(
-      400,
-      `slug must be one of: ${VALID_SLUGS.join(", ")}`
-    );
+    throw new ApiError(400, `slug must be one of: ${VALID_SLUGS.join(", ")}`);
   }
 
   if (!["Men", "Women"].includes(category)) {
     throw new ApiError(400, 'category must be "Men" or "Women".');
-  }
-
-  let parsedSizes = ["S", "M", "L", "XL"];
-  if (sizes) {
-    parsedSizes = Array.isArray(sizes)
-      ? sizes
-      : String(sizes)
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
   }
 
   // Uploaded media processing
@@ -395,60 +282,52 @@ const createProduct = asyncHandler(async (req, res) => {
     images.unshift(legacyImage);
   }
 
+  const bodyImages = parseArrayField(req.body.images);
+  if (bodyImages) images = [...bodyImages, ...images];
+
   if (req.body.image && !images.includes(req.body.image)) {
     images.unshift(req.body.image);
   }
 
   images = uniqueArray(images);
-  const primaryImage = images.length > 0 ? images[0] : null;
 
-  const videos = uniqueArray(getUploadedVideos(req));
+  const videos = uniqueArray([
+    ...(parseArrayField(req.body.videos) || []),
+    ...getUploadedVideos(req),
+  ]);
 
-  const db = readDB();
-
-  const newProduct = {
-    id: `custom-${crypto.randomUUID().slice(0, 8)}`,
+  const product = await Product.create({
     slug,
-    name,
+    name: String(name).trim(),
     brand: brand || "OrbitBuy",
     category,
     type: type || null,
     description: description || "",
-    sizes: parsedSizes,
+    sizes: parseSizes(sizes, ["S", "M", "L", "XL"]),
     price: Number(price),
     oldPrice: oldPrice ? Number(oldPrice) : null,
     rating: 4.5,
     reviews: 0,
-    stock: stock ? Number(stock) : 20,
+    stock: stock !== undefined && stock !== "" ? Number(stock) : 20,
     isBestSeller: parseBool(isBestSeller),
     isNewArrival: parseBool(isNewArrival),
-    image: primaryImage,
+    image: images.length > 0 ? images[0] : null,
     images,
     videos,
-    createdAt: new Date().toISOString(),
-  };
-
-  db.products.unshift(newProduct);
-  writeDB(db);
-
-  res.status(201).json({
-    success: true,
-    product: newProduct,
   });
+
+  res.status(201).json({ success: true, product: product.toJSON() });
 });
 
 /*
 =====================================================
 UPDATE PRODUCT
+PUT /api/products/:id   (admin / manager)
 =====================================================
 */
 
 const updateProduct = asyncHandler(async (req, res) => {
-  const db = readDB();
-
-  const product = db.products.find(
-    (p) => String(p.id) === req.params.id
-  );
+  const product = await Product.findById(req.params.id);
 
   if (!product) {
     throw new ApiError(404, "Product not found.");
@@ -470,10 +349,7 @@ const updateProduct = asyncHandler(async (req, res) => {
   } = req.body;
 
   if (slug && !VALID_SLUGS.includes(slug)) {
-    throw new ApiError(
-      400,
-      `slug must be one of: ${VALID_SLUGS.join(", ")}`
-    );
+    throw new ApiError(400, `slug must be one of: ${VALID_SLUGS.join(", ")}`);
   }
 
   if (category && !["Men", "Women"].includes(category)) {
@@ -484,67 +360,44 @@ const updateProduct = asyncHandler(async (req, res) => {
   if (brand !== undefined) product.brand = brand;
   if (category !== undefined) product.category = category;
   if (slug !== undefined) product.slug = slug;
-  if (type !== undefined) product.type = type;
+  if (type !== undefined) product.type = type || null;
   if (description !== undefined) product.description = description;
 
-  if (price !== undefined && price !== "") {
-    product.price = Number(price);
-  }
+  if (price !== undefined && price !== "") product.price = Number(price);
 
   if (oldPrice !== undefined) {
-    product.oldPrice = oldPrice === "" ? null : Number(oldPrice);
+    product.oldPrice = oldPrice === "" || oldPrice === null ? null : Number(oldPrice);
   }
 
-  if (stock !== undefined && stock !== "") {
-    product.stock = Number(stock);
-  }
+  if (stock !== undefined && stock !== "") product.stock = Number(stock);
 
   if (sizes !== undefined && sizes !== "") {
-    product.sizes = Array.isArray(sizes)
-      ? sizes
-      : String(sizes)
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
+    product.sizes = parseSizes(sizes, product.sizes);
   }
 
   if (isBestSeller !== undefined) {
-    product.isBestSeller = parseBool(isBestSeller);
+    product.isBestSeller = parseBool(isBestSeller, product.isBestSeller);
   }
 
   if (isNewArrival !== undefined) {
-    product.isNewArrival = parseBool(isNewArrival);
+    product.isNewArrival = parseBool(isNewArrival, product.isNewArrival);
   }
 
-  /*
-  ---------------------------------------------------
-  EXISTING IMAGES RETENTION
-  ---------------------------------------------------
-  */
+  /* ---- Existing images retention ---- */
   let finalImages = getProductImages(product);
 
   if (req.body.existingImages !== undefined) {
-    const parsed = parseArrayField(req.body.existingImages);
-    finalImages = Array.isArray(parsed) ? parsed : [];
+    finalImages = parseArrayField(req.body.existingImages) || [];
   }
 
-  /*
-  ---------------------------------------------------
-  EXISTING VIDEOS RETENTION
-  ---------------------------------------------------
-  */
+  /* ---- Existing videos retention ---- */
   let finalVideos = getProductVideos(product);
 
   if (req.body.existingVideos !== undefined) {
-    const parsed = parseArrayField(req.body.existingVideos);
-    finalVideos = Array.isArray(parsed) ? parsed : [];
+    finalVideos = parseArrayField(req.body.existingVideos) || [];
   }
 
-  /*
-  ---------------------------------------------------
-  NEW UPLOADED MEDIA ATTACHMENT
-  ---------------------------------------------------
-  */
+  /* ---- Newly uploaded media ---- */
   const newImages = getUploadedImages(req);
   const legacyImage = getLegacyImage(req);
 
@@ -553,9 +406,7 @@ const updateProduct = asyncHandler(async (req, res) => {
   }
 
   finalImages = uniqueArray([...finalImages, ...newImages]);
-
-  const newVideos = getUploadedVideos(req);
-  finalVideos = uniqueArray([...finalVideos, ...newVideos]);
+  finalVideos = uniqueArray([...finalVideos, ...getUploadedVideos(req)]);
 
   if (finalImages.length === 0 && req.body.image) {
     finalImages = [req.body.image];
@@ -565,48 +416,35 @@ const updateProduct = asyncHandler(async (req, res) => {
   product.image = finalImages.length > 0 ? finalImages[0] : null;
   product.videos = finalVideos;
 
-  writeDB(db);
+  await product.save();
 
-  res.json({
-    success: true,
-    product,
-  });
+  res.json({ success: true, product: product.toJSON() });
 });
 
 /*
 =====================================================
 DELETE PRODUCT
+DELETE /api/products/:id   (admin / manager)
 =====================================================
 */
 
 const deleteProduct = asyncHandler(async (req, res) => {
-  const db = readDB();
-
-  const product = db.products.find(
-    (p) => String(p.id) === req.params.id
-  );
+  const product = await Product.findById(req.params.id);
 
   if (!product) {
     throw new ApiError(404, "Product not found.");
   }
 
-  db.products = db.products.filter(
-    (p) => String(p.id) !== req.params.id
-  );
+  await Promise.all([
+    Product.deleteOne({ _id: product._id }),
+    // Don't leave dangling references behind.
+    Review.deleteMany({ productId: product._id }),
+    Cart.updateMany({}, { $pull: { items: { productId: String(product._id) } } }),
+    Wishlist.updateMany({}, { $pull: { products: String(product._id) } }),
+  ]);
 
-  writeDB(db);
-
-  res.json({
-    success: true,
-    message: "Product deleted successfully.",
-  });
+  res.json({ success: true, message: "Product deleted successfully." });
 });
-
-/*
-=====================================================
-EXPORTS
-=====================================================
-*/
 
 module.exports = {
   getProducts,

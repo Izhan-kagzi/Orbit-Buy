@@ -1,714 +1,392 @@
-const fs = require("fs");
-const path = require("path");
+const Review = require("../models/Review");
+const Product = require("../models/Product");
+const User = require("../models/User");
+const Order = require("../models/Order");
+const ApiError = require("../utils/ApiError");
+const asyncHandler = require("../utils/asyncHandler");
 
-// ============================================================
-// DB.JSON LOCATION
-// ============================================================
+/**
+ * Reviews.
+ *
+ * Customers post one review per product. Admins and managers can list
+ * every review, reply to a customer's review, edit or remove that
+ * reply, approve/unapprove a review, and delete a review outright.
+ *
+ * REVIEW_AUTO_APPROVE=false in .env switches the store to moderated
+ * mode, where new reviews stay hidden until staff approve them.
+ */
 
-// Change this only if your db.json is somewhere else.
-//
-// Expected structure:
-//
-// {
-//   "users": [],
-//   "products": [],
-//   "reviews": [],
-//   ...
-// }
+const AUTO_APPROVE =
+  String(process.env.REVIEW_AUTO_APPROVE || "true").toLowerCase() !== "false";
 
-const DB_PATH = path.join(__dirname, "../../db.json");
+const isStaff = (req) =>
+  Boolean(req.user && ["admin", "manager"].includes(req.user.role));
 
-// ============================================================
-// READ DATABASE
-// ============================================================
+/* ============================================================
+   GET PRODUCT REVIEWS
+   GET /api/reviews/product/:productId
+   PUBLIC
+============================================================ */
 
-const readDB = () => {
-try {
-if (!fs.existsSync(DB_PATH)) {
-return {
-users: [],
-products: [],
-reviews: [],
-};
-}
+const getProductReviews = asyncHandler(async (req, res) => {
+  const { productId } = req.params;
 
-```
-const data = fs.readFileSync(DB_PATH, "utf8");
+  if (!productId) {
+    throw new ApiError(400, "Product ID is required.");
+  }
 
-if (!data.trim()) {
-  return {
-    users: [],
-    products: [],
-    reviews: [],
+  const product = await Product.findById(productId).lean();
+
+  if (!product) {
+    throw new ApiError(404, "Product not found.");
+  }
+
+  // Staff previewing the product page see pending reviews too.
+  const filter = { productId: String(productId) };
+  if (!isStaff(req)) filter.approved = true;
+
+  const reviews = await Review.find(filter).sort({ createdAt: -1 });
+
+  const summary = await Review.aggregate([
+    { $match: { productId: String(productId), approved: true } },
+    {
+      $group: {
+        _id: "$rating",
+        count: { $sum: 1 },
+      },
+    },
+  ]);
+
+  const breakdown = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+  let totalRating = 0;
+  let totalCount = 0;
+
+  summary.forEach(({ _id, count }) => {
+    breakdown[_id] = count;
+    totalRating += _id * count;
+    totalCount += count;
+  });
+
+  res.json({
+    success: true,
+    count: reviews.length,
+    averageRating: totalCount
+      ? Number((totalRating / totalCount).toFixed(1))
+      : 0,
+    breakdown,
+    reviews: reviews.map((review) => review.toJSON()),
+  });
+});
+
+/* ============================================================
+   GET ALL REVIEWS
+   GET /api/reviews
+   ADMIN / MANAGER
+============================================================ */
+
+const getAllReviews = asyncHandler(async (req, res) => {
+  const { productId, rating, approved, replied, q } = req.query;
+
+  const filter = {};
+
+  if (productId) filter.productId = String(productId);
+  if (rating) filter.rating = Number(rating);
+
+  if (approved === "true") filter.approved = true;
+  if (approved === "false") filter.approved = false;
+
+  if (replied === "true") filter.reply = { $ne: null };
+  if (replied === "false") filter.reply = null;
+
+  if (q) {
+    const keyword = new RegExp(
+      String(q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+      "i"
+    );
+    filter.$or = [
+      { comment: keyword },
+      { userName: keyword },
+      { userEmail: keyword },
+      { productName: keyword },
+    ];
+  }
+
+  const reviews = await Review.find(filter).sort({ createdAt: -1 });
+
+  res.json({
+    success: true,
+    count: reviews.length,
+    pending: await Review.countDocuments({ approved: false }),
+    unanswered: await Review.countDocuments({ reply: null }),
+    reviews: reviews.map((review) => review.toJSON()),
+  });
+});
+
+/* ============================================================
+   CREATE REVIEW
+   POST /api/reviews
+   CUSTOMER (logged in)
+============================================================ */
+
+const createReview = asyncHandler(async (req, res) => {
+  const { productId, product_id, rating, comment } = req.body;
+
+  const finalProductId = productId ?? product_id;
+
+  if (!finalProductId) {
+    throw new ApiError(400, "Product ID is required.");
+  }
+
+  const numericRating = Number(rating);
+
+  if (
+    !Number.isFinite(numericRating) ||
+    numericRating < 1 ||
+    numericRating > 5
+  ) {
+    throw new ApiError(400, "Rating must be between 1 and 5.");
+  }
+
+  if (!comment || !String(comment).trim()) {
+    throw new ApiError(400, "Review comment is required.");
+  }
+
+  const product = await Product.findById(finalProductId).lean();
+
+  if (!product) {
+    throw new ApiError(404, "Product not found.");
+  }
+
+  const existing = await Review.findOne({
+    productId: String(finalProductId),
+    userId: req.user.id,
+  }).lean();
+
+  if (existing) {
+    throw new ApiError(409, "You have already reviewed this product.");
+  }
+
+  const user = await User.findById(req.user.id).lean();
+
+  // Flag reviews written by someone who actually bought the product.
+  const purchased = await Order.exists({
+    userId: req.user.id,
+    "items.id": String(finalProductId),
+    status: { $ne: "Cancelled" },
+  });
+
+  const review = await Review.create({
+    productId: String(finalProductId),
+    userId: req.user.id,
+    rating: numericRating,
+    comment: String(comment).trim(),
+    approved: AUTO_APPROVE,
+    reply: null,
+    userName: user?.name || req.user.name || "Customer",
+    userEmail: user?.email || req.user.email || "",
+    productName: product.name || "Product",
+    verifiedPurchase: Boolean(purchased),
+  });
+
+  await Review.syncProductRating(finalProductId);
+
+  res.status(201).json({
+    success: true,
+    message: AUTO_APPROVE
+      ? "Review submitted successfully."
+      : "Review submitted successfully and is awaiting approval.",
+    review: review.toJSON(),
+  });
+});
+
+/* ============================================================
+   UPDATE OWN REVIEW
+   PUT /api/reviews/:id
+   CUSTOMER (own review only)
+============================================================ */
+
+const updateMyReview = asyncHandler(async (req, res) => {
+  const { rating, comment } = req.body;
+
+  const review = await Review.findById(req.params.id);
+
+  if (!review) {
+    throw new ApiError(404, "Review not found.");
+  }
+
+  if (String(review.userId) !== req.user.id) {
+    throw new ApiError(403, "You can only edit your own review.");
+  }
+
+  if (rating !== undefined) {
+    const numericRating = Number(rating);
+    if (
+      !Number.isFinite(numericRating) ||
+      numericRating < 1 ||
+      numericRating > 5
+    ) {
+      throw new ApiError(400, "Rating must be between 1 and 5.");
+    }
+    review.rating = numericRating;
+  }
+
+  if (comment !== undefined) {
+    if (!String(comment).trim()) {
+      throw new ApiError(400, "Review comment is required.");
+    }
+    review.comment = String(comment).trim();
+  }
+
+  await review.save();
+  await Review.syncProductRating(review.productId);
+
+  res.json({
+    success: true,
+    message: "Review updated successfully.",
+    review: review.toJSON(),
+  });
+});
+
+/* ============================================================
+   REPLY TO A REVIEW
+   PUT  /api/reviews/:id/reply   (also accepts POST)
+   ADMIN / MANAGER
+============================================================ */
+
+const replyToReview = asyncHandler(async (req, res) => {
+  const { reply, response, message, text } = req.body || {};
+
+  // Accept whichever field name the frontend sends.
+  const finalReply = reply ?? response ?? message ?? text;
+
+  if (!finalReply || !String(finalReply).trim()) {
+    throw new ApiError(400, "Reply message is required.");
+  }
+
+  if (String(finalReply).trim().length > 2000) {
+    throw new ApiError(400, "Reply is too long (max 2000 characters).");
+  }
+
+  const review = await Review.findById(req.params.id);
+
+  if (!review) {
+    throw new ApiError(404, "Review not found.");
+  }
+
+  review.reply = {
+    message: String(finalReply).trim(),
+    repliedBy: req.user.id,
+    repliedByName: req.user.name,
+    repliedByRole: req.user.role,
+    repliedAt: new Date(),
   };
-}
 
-const db = JSON.parse(data);
+  await review.save();
 
-// Make sure required arrays exist
-if (!Array.isArray(db.users)) {
-  db.users = [];
-}
-
-if (!Array.isArray(db.products)) {
-  db.products = [];
-}
-
-if (!Array.isArray(db.reviews)) {
-  db.reviews = [];
-}
-
-return db;
-```
-
-} catch (error) {
-console.error("Error reading db.json:", error);
-throw new Error("Unable to read database.");
-}
-};
-
-// ============================================================
-// WRITE DATABASE
-// ============================================================
-
-const writeDB = (db) => {
-try {
-fs.writeFileSync(
-DB_PATH,
-JSON.stringify(db, null, 2),
-"utf8"
-);
-} catch (error) {
-console.error("Error writing db.json:", error);
-throw new Error("Unable to save database.");
-}
-};
-
-// ============================================================
-// GENERATE ID
-// ============================================================
-
-const generateId = (items) => {
-if (!items.length) {
-return 1;
-}
-
-const numericIds = items
-.map((item) => Number(item.id))
-.filter((id) => Number.isFinite(id));
-
-if (!numericIds.length) {
-return Date.now();
-}
-
-return Math.max(...numericIds) + 1;
-};
-
-// ============================================================
-// GET USER ID
-// ============================================================
-
-const getUserId = (req) => {
-return (
-req.user?.id ??
-req.user?.userId ??
-req.user?._id ??
-null
-);
-};
-
-// ============================================================
-// GET USER
-// ============================================================
-
-const getUserById = (db, userId) => {
-return db.users.find(
-(user) =>
-String(user.id) === String(userId)
-);
-};
-
-// ============================================================
-// GET PRODUCT
-// ============================================================
-
-const getProductById = (db, productId) => {
-return db.products.find(
-(product) =>
-String(product.id) === String(productId)
-);
-};
-
-// ============================================================
-// GET PRODUCT REVIEWS
-// GET /api/reviews/product/:productId
-// PUBLIC
-// ============================================================
-
-const getProductReviews = async (req, res, next) => {
-try {
-const { productId } = req.params;
-
-```
-if (!productId) {
-  return res.status(400).json({
-    success: false,
-    message: "Product ID is required.",
+  res.json({
+    success: true,
+    message: "Reply saved successfully.",
+    review: review.toJSON(),
   });
-}
-
-const db = readDB();
-
-const product = getProductById(
-  db,
-  productId
-);
-
-if (!product) {
-  return res.status(404).json({
-    success: false,
-    message: "Product not found.",
-  });
-}
-
-const reviews = db.reviews
-  .filter(
-    (review) =>
-      String(review.productId ?? review.product_id) ===
-      String(productId) &&
-      (
-        review.approved === true ||
-        review.approved === 1
-      )
-  )
-  .map((review) => {
-    const user = getUserById(
-      db,
-      review.userId ?? review.user_id
-    );
-
-    return {
-      ...review,
-
-      productId:
-        review.productId ??
-        review.product_id,
-
-      userId:
-        review.userId ??
-        review.user_id,
-
-      userName:
-        review.userName ??
-        user?.name ??
-        user?.username ??
-        "Customer",
-
-      userEmail:
-        review.userEmail ??
-        user?.email ??
-        "",
-    };
-  })
-  .sort(
-    (a, b) =>
-      new Date(b.createdAt ?? b.created_at ?? 0) -
-      new Date(a.createdAt ?? a.created_at ?? 0)
-  );
-
-return res.status(200).json({
-  success: true,
-  count: reviews.length,
-  reviews,
 });
-```
 
-} catch (error) {
-next(error);
-}
-};
+/* ============================================================
+   DELETE A REPLY
+   DELETE /api/reviews/:id/reply
+   ADMIN / MANAGER
+============================================================ */
 
-// ============================================================
-// GET ALL REVIEWS
-// GET /api/reviews
-// ADMIN / MANAGER
-// ============================================================
+const deleteReply = asyncHandler(async (req, res) => {
+  const review = await Review.findById(req.params.id);
 
-const getAllReviews = async (req, res, next) => {
-try {
-const db = readDB();
+  if (!review) {
+    throw new ApiError(404, "Review not found.");
+  }
 
-```
-const reviews = db.reviews
-  .map((review) => {
-    const user = getUserById(
-      db,
-      review.userId ?? review.user_id
-    );
+  if (!review.reply) {
+    throw new ApiError(400, "This review has no reply to delete.");
+  }
 
-    const product = getProductById(
-      db,
-      review.productId ?? review.product_id
-    );
+  review.reply = null;
+  await review.save();
 
-    return {
-      ...review,
-
-      productId:
-        review.productId ??
-        review.product_id,
-
-      userId:
-        review.userId ??
-        review.user_id,
-
-      productName:
-        review.productName ??
-        product?.name ??
-        product?.title ??
-        "Product",
-
-      userName:
-        review.userName ??
-        user?.name ??
-        user?.username ??
-        "Customer",
-
-      userEmail:
-        review.userEmail ??
-        user?.email ??
-        "",
-
-      approved:
-        review.approved === true ||
-        review.approved === 1,
-    };
-  })
-  .sort(
-    (a, b) =>
-      new Date(b.createdAt ?? b.created_at ?? 0) -
-      new Date(a.createdAt ?? a.created_at ?? 0)
-  );
-
-return res.status(200).json({
-  success: true,
-  count: reviews.length,
-  reviews,
+  res.json({
+    success: true,
+    message: "Reply deleted successfully.",
+    review: review.toJSON(),
+  });
 });
-```
 
-} catch (error) {
-next(error);
-}
-};
+/* ============================================================
+   APPROVE / UNAPPROVE A REVIEW
+   PUT /api/reviews/:id/approve   { approved?: boolean }
+   ADMIN / MANAGER
+============================================================ */
 
-// ============================================================
-// CREATE REVIEW
-// POST /api/reviews
-// CUSTOMER
-// ============================================================
+const approveReview = asyncHandler(async (req, res) => {
+  const review = await Review.findById(req.params.id);
 
-const createReview = async (req, res, next) => {
-try {
-const userId = getUserId(req);
+  if (!review) {
+    throw new ApiError(404, "Review not found.");
+  }
 
-```
-const {
-  productId,
-  product_id,
-  rating,
-  comment,
-} = req.body;
+  const { approved } = req.body || {};
 
-const finalProductId =
-  productId ?? product_id;
+  review.approved =
+    approved === undefined
+      ? true
+      : approved === true || approved === "true" || approved === 1;
 
-if (!userId) {
-  return res.status(401).json({
-    success: false,
-    message: "Authentication required.",
+  await review.save();
+  await Review.syncProductRating(review.productId);
+
+  res.json({
+    success: true,
+    message: review.approved
+      ? "Review approved successfully."
+      : "Review hidden from the storefront.",
+    review: review.toJSON(),
   });
-}
-
-if (!finalProductId) {
-  return res.status(400).json({
-    success: false,
-    message: "Product ID is required.",
-  });
-}
-
-const numericRating = Number(rating);
-
-if (
-  !Number.isFinite(numericRating) ||
-  numericRating < 1 ||
-  numericRating > 5
-) {
-  return res.status(400).json({
-    success: false,
-    message: "Rating must be between 1 and 5.",
-  });
-}
-
-if (
-  !comment ||
-  !String(comment).trim()
-) {
-  return res.status(400).json({
-    success: false,
-    message: "Review comment is required.",
-  });
-}
-
-const db = readDB();
-
-// Check product
-const product = getProductById(
-  db,
-  finalProductId
-);
-
-if (!product) {
-  return res.status(404).json({
-    success: false,
-    message: "Product not found.",
-  });
-}
-
-// Check duplicate review
-const existingReview =
-  db.reviews.find(
-    (review) =>
-      String(
-        review.productId ??
-        review.product_id
-      ) === String(finalProductId) &&
-      String(
-        review.userId ??
-        review.user_id
-      ) === String(userId)
-  );
-
-if (existingReview) {
-  return res.status(409).json({
-    success: false,
-    message:
-      "You have already reviewed this product.",
-  });
-}
-
-const user = getUserById(
-  db,
-  userId
-);
-
-const now = new Date().toISOString();
-
-const review = {
-  id: generateId(db.reviews),
-
-  productId: finalProductId,
-
-  userId: userId,
-
-  rating: numericRating,
-
-  comment: String(comment).trim(),
-
-  approved: false,
-
-  reply: null,
-
-  replyBy: null,
-
-  replyAt: null,
-
-  userName:
-    user?.name ??
-    user?.username ??
-    "Customer",
-
-  userEmail:
-    user?.email ??
-    "",
-
-  productName:
-    product.name ??
-    product.title ??
-    "Product",
-
-  createdAt: now,
-
-  updatedAt: now,
-};
-
-db.reviews.push(review);
-
-writeDB(db);
-
-return res.status(201).json({
-  success: true,
-  message:
-    "Review submitted successfully and is awaiting approval.",
-  review,
 });
-```
 
-} catch (error) {
-next(error);
-}
-};
+/* ============================================================
+   DELETE A REVIEW
+   DELETE /api/reviews/:id
+   ADMIN / MANAGER  (a customer may delete their own)
+============================================================ */
 
-// ============================================================
-// REPLY TO REVIEW
-// PUT /api/reviews/:id/reply
-// ADMIN / MANAGER
-// ============================================================
+const deleteReview = asyncHandler(async (req, res) => {
+  const review = await Review.findById(req.params.id);
 
-const replyToReview = async (req, res, next) => {
-try {
-const { id } = req.params;
+  if (!review) {
+    throw new ApiError(404, "Review not found.");
+  }
 
-```
-const {
-  reply,
-  response,
-  message,
-} = req.body;
+  const isOwner = String(review.userId) === req.user.id;
 
-const finalReply =
-  reply ??
-  response ??
-  message;
+  if (!isStaff(req) && !isOwner) {
+    throw new ApiError(403, "You can only delete your own review.");
+  }
 
-const staffId = getUserId(req);
+  const { productId } = review;
 
-if (!id) {
-  return res.status(400).json({
-    success: false,
-    message: "Review ID is required.",
+  await Review.deleteOne({ _id: review._id });
+  await Review.syncProductRating(productId);
+
+  res.json({
+    success: true,
+    message: "Review deleted successfully.",
+    id: String(review._id),
   });
-}
-
-if (
-  !finalReply ||
-  !String(finalReply).trim()
-) {
-  return res.status(400).json({
-    success: false,
-    message: "Reply message is required.",
-  });
-}
-
-const db = readDB();
-
-const review = db.reviews.find(
-  (item) =>
-    String(item.id) === String(id)
-);
-
-if (!review) {
-  return res.status(404).json({
-    success: false,
-    message: "Review not found.",
-  });
-}
-
-const now = new Date().toISOString();
-
-review.reply =
-  String(finalReply).trim();
-
-review.replyBy =
-  staffId;
-
-review.replyAt =
-  now;
-
-review.updatedAt =
-  now;
-
-writeDB(db);
-
-return res.status(200).json({
-  success: true,
-  message: "Reply added successfully.",
-  review,
 });
-```
-
-} catch (error) {
-next(error);
-}
-};
-
-// ============================================================
-// DELETE REPLY
-// DELETE /api/reviews/:id/reply
-// ADMIN / MANAGER
-// ============================================================
-
-const deleteReply = async (req, res, next) => {
-try {
-const { id } = req.params;
-
-```
-if (!id) {
-  return res.status(400).json({
-    success: false,
-    message: "Review ID is required.",
-  });
-}
-
-const db = readDB();
-
-const review = db.reviews.find(
-  (item) =>
-    String(item.id) === String(id)
-);
-
-if (!review) {
-  return res.status(404).json({
-    success: false,
-    message: "Review not found.",
-  });
-}
-
-review.reply = null;
-review.replyBy = null;
-review.replyAt = null;
-review.updatedAt =
-  new Date().toISOString();
-
-writeDB(db);
-
-return res.status(200).json({
-  success: true,
-  message:
-    "Reply deleted successfully.",
-  review,
-});
-```
-
-} catch (error) {
-next(error);
-}
-};
-
-// ============================================================
-// DELETE REVIEW
-// DELETE /api/reviews/:id
-// ADMIN / MANAGER
-// ============================================================
-
-const deleteReview = async (req, res, next) => {
-try {
-const { id } = req.params;
-
-```
-if (!id) {
-  return res.status(400).json({
-    success: false,
-    message: "Review ID is required.",
-  });
-}
-
-const db = readDB();
-
-const reviewIndex =
-  db.reviews.findIndex(
-    (item) =>
-      String(item.id) === String(id)
-  );
-
-if (reviewIndex === -1) {
-  return res.status(404).json({
-    success: false,
-    message: "Review not found.",
-  });
-}
-
-db.reviews.splice(
-  reviewIndex,
-  1
-);
-
-writeDB(db);
-
-return res.status(200).json({
-  success: true,
-  message:
-    "Review deleted successfully.",
-});
-```
-
-} catch (error) {
-next(error);
-}
-};
-
-// ============================================================
-// APPROVE REVIEW
-// PUT /api/reviews/:id/approve
-// ADMIN / MANAGER
-// ============================================================
-
-const approveReview = async (req, res, next) => {
-try {
-const { id } = req.params;
-
-```
-if (!id) {
-  return res.status(400).json({
-    success: false,
-    message: "Review ID is required.",
-  });
-}
-
-const db = readDB();
-
-const review = db.reviews.find(
-  (item) =>
-    String(item.id) === String(id)
-);
-
-if (!review) {
-  return res.status(404).json({
-    success: false,
-    message: "Review not found.",
-  });
-}
-
-review.approved = true;
-
-review.updatedAt =
-  new Date().toISOString();
-
-writeDB(db);
-
-return res.status(200).json({
-  success: true,
-  message:
-    "Review approved successfully.",
-  review,
-});
-```
-
-} catch (error) {
-next(error);
-}
-};
-
-// ============================================================
-// EXPORTS
-// ============================================================
 
 module.exports = {
-getProductReviews,
-getAllReviews,
-createReview,
-replyToReview,
-deleteReply,
-deleteReview,
-approveReview,
+  getProductReviews,
+  getAllReviews,
+  createReview,
+  updateMyReview,
+  replyToReview,
+  deleteReply,
+  deleteReview,
+  approveReview,
 };

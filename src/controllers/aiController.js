@@ -1,4 +1,4 @@
-const { readDB } = require("../config/db");
+const Product = require("../models/Product");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
 
@@ -161,10 +161,12 @@ const compareProducts = asyncHandler(async (req, res) => {
   }
 
   const uniqueIds = [...new Set(productIds.map(normalizeId).filter(Boolean))];
-  const db = readDB();
-  const products = uniqueIds
-    .map((id) => db.products.find((p) => normalizeId(p.id) === id))
-    .filter(Boolean);
+
+  const found = await Product.find({ _id: { $in: uniqueIds } });
+  const foundMap = new Map(found.map((p) => [String(p._id), p.toJSON()]));
+
+  // Preserve the order the client asked for.
+  const products = uniqueIds.map((id) => foundMap.get(id)).filter(Boolean);
 
   if (products.length < 2) {
     throw new ApiError(404, "Couldn't find enough of those products.");
@@ -252,14 +254,16 @@ const recommendProducts = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Tell the AI what you're looking for.");
   }
 
-  const db = readDB();
-  let candidates = db.products.filter((p) => Number(p.stock) > 0);
+  const filter = { stock: { $gt: 0 } };
 
   if (category && category !== "All") {
-    candidates = candidates.filter(
-      (p) => String(p.category).toLowerCase() === String(category).toLowerCase()
+    filter.category = new RegExp(
+      `^${String(category).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+      "i"
     );
   }
+
+  const candidates = (await Product.find(filter)).map((p) => p.toJSON());
 
   if (candidates.length === 0) {
     return res.json({

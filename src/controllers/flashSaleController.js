@@ -1,17 +1,16 @@
-const { readDB, writeDB } = require("../config/db");
-const asyncHandler = require("../utils/asyncHandler");
+const FlashSale = require("../models/FlashSale");
+const Product = require("../models/Product");
 const ApiError = require("../utils/ApiError");
+const asyncHandler = require("../utils/asyncHandler");
 
-const DEFAULT_FLASH_SALE = {
-  title: "Flash Sale!",
-  description: "Up to 30% off - Limited Time Offer!",
-  images: [],
-  startTime: null,
-  endTime: null,
-  active: false,
-  updatedAt: null,
-  updatedBy: null,
-};
+/**
+ * Flash sales.
+ *
+ * Previously there was a single flash-sale blob that could only be
+ * edited or wiped. It is now a real collection: an admin or a manager
+ * can ADD any number of sales, each with its own start and end
+ * date/time, EDIT them, and DELETE any single one.
+ */
 
 /* ============================================================
    HELPERS
@@ -30,335 +29,411 @@ const normalizeImages = (images) => {
   ];
 };
 
-/* ------------------------------------------------------------
-   Uploaded images
------------------------------------------------------------- */
-
+/* Images newly uploaded through multer on this request. */
 const getUploadedImages = (req) => {
-  if (!req.files || !Array.isArray(req.files)) {
-    return [];
-  }
+  if (!req.files || !Array.isArray(req.files)) return [];
 
-  return req.files.map(
-    (file) => `/uploads/custom/${file.filename}`
-  );
+  return req.files.map((file) => `/uploads/custom/${file.filename}`);
 };
 
-/* ------------------------------------------------------------
-   Get / initialize Flash Sale from DB
------------------------------------------------------------- */
+/* FormData sends arrays as JSON strings or comma-separated values. */
+const parseImageList = (value) => {
+  if (value === undefined || value === null || value === "") return null;
 
-const ensureFlashSale = (db) => {
-  if (!db.flashSale || typeof db.flashSale !== "object") {
-    db.flashSale = {
-      ...DEFAULT_FLASH_SALE,
-    };
+  if (Array.isArray(value)) return normalizeImages(value);
+
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) return normalizeImages(parsed);
+      return normalizeImages([String(parsed)]);
+    } catch (error) {
+      return normalizeImages(value.split(","));
+    }
   }
 
-  db.flashSale = {
-    ...DEFAULT_FLASH_SALE,
-    ...db.flashSale,
-    images: normalizeImages(db.flashSale.images),
-  };
+  throw new ApiError(400, "Invalid images value.");
+};
 
-  return db.flashSale;
+/**
+ * Accepts anything a datetime-local input or a JSON client sends:
+ * "2026-09-20T18:30", an ISO string, or a timestamp.
+ */
+const parseDateTime = (value, label) => {
+  if (value === undefined || value === null || value === "") return null;
+
+  const parsed = new Date(
+    typeof value === "number" || /^\d+$/.test(String(value))
+      ? Number(value)
+      : value
+  );
+
+  if (Number.isNaN(parsed.getTime())) {
+    throw new ApiError(400, `Invalid Flash Sale ${label} date/time.`);
+  }
+
+  return parsed;
+};
+
+const parseBool = (value, fallback = false) => {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  return ["true", "1", "yes", "on"].includes(String(value).toLowerCase());
+};
+
+const parseProducts = (value) => {
+  if (value === undefined || value === null || value === "") return null;
+
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) return parsed.map(String).filter(Boolean);
+    } catch (error) {
+      return value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+  }
+
+  return null;
+};
+
+const staffStamp = (req) =>
+  req.user
+    ? { id: req.user.id, name: req.user.name, role: req.user.role }
+    : { id: null, name: null, role: null };
+
+/**
+ * Serialises a sale with its computed status. Status is derived from
+ * the clock on every read, so a sale automatically flips from
+ * "upcoming" to "active" to "ended" without any cron job.
+ */
+const serialize = (sale) => {
+  const json = sale.toJSON();
+  return {
+    ...json,
+    status: sale.status,
+    isRunning: sale.isRunning,
+  };
 };
 
 /* ============================================================
-   GET FLASH SALE
-   PUBLIC
+   LIST FLASH SALES
+   GET /api/flash-sale          -> currently running sale (legacy shape)
+   GET /api/flash-sale/all      -> every sale
+   PUBLIC (list is public; ?all=true needs no auth but is harmless)
 ============================================================ */
 
-const getFlashSale = asyncHandler(async (req, res) => {
-  const db = readDB();
+const getFlashSales = asyncHandler(async (req, res) => {
+  const { status } = req.query;
 
-  const flashSale = ensureFlashSale(db);
+  const sales = await FlashSale.find().sort({ startTime: -1 });
 
-  const now = Date.now();
+  let result = sales.map(serialize);
 
-  const startTime = flashSale.startTime
-    ? new Date(flashSale.startTime).getTime()
-    : null;
-
-  const endTime = flashSale.endTime
-    ? new Date(flashSale.endTime).getTime()
-    : null;
-
-  let status = "inactive";
-
-  if (flashSale.active) {
-    if (startTime && now < startTime) {
-      status = "upcoming";
-    } else if (endTime && now >= endTime) {
-      status = "ended";
-    } else {
-      status = "active";
-    }
+  if (status) {
+    result = result.filter((sale) => sale.status === status);
   }
 
   res.json({
     success: true,
-
-    flashSale: {
-      ...flashSale,
-      status,
-      isRunning: status === "active",
-    },
+    count: result.length,
+    flashSales: result,
+    // Alias kept so older frontend code reading `sales` still works.
+    sales: result,
   });
 });
 
 /* ============================================================
-   UPDATE FLASH SALE
+   GET THE ACTIVE FLASH SALE
+   GET /api/flash-sale
+   PUBLIC
+   Returns the sale that is running right now (or the next upcoming
+   one), in the single-object shape the storefront banner expects.
+============================================================ */
+
+const getActiveFlashSale = asyncHandler(async (req, res) => {
+  const now = new Date();
+
+  const running = await FlashSale.findOne({
+    active: true,
+    startTime: { $lte: now },
+    endTime: { $gt: now },
+  }).sort({ endTime: 1 });
+
+  const upcoming = running
+    ? null
+    : await FlashSale.findOne({
+        active: true,
+        startTime: { $gt: now },
+      }).sort({ startTime: 1 });
+
+  const sale = running || upcoming;
+
+  res.json({
+    success: true,
+    flashSale: sale ? serialize(sale) : null,
+  });
+});
+
+/* ============================================================
+   GET ONE FLASH SALE
+   GET /api/flash-sale/:id
+   PUBLIC
+============================================================ */
+
+const getFlashSaleById = asyncHandler(async (req, res) => {
+  const sale = await FlashSale.findById(req.params.id);
+
+  if (!sale) {
+    throw new ApiError(404, "Flash Sale not found.");
+  }
+
+  res.json({ success: true, flashSale: serialize(sale) });
+});
+
+/* ============================================================
+   ADD A FLASH SALE
+   POST /api/flash-sale
+   ADMIN + MANAGER
+============================================================ */
+
+const createFlashSale = asyncHandler(async (req, res) => {
+  const {
+    title,
+    description,
+    startTime,
+    startDate,
+    endTime,
+    endDate,
+    active,
+    discountPercent,
+    products,
+  } = req.body || {};
+
+  if (!title || !String(title).trim()) {
+    throw new ApiError(400, "Flash Sale title is required.");
+  }
+
+  // `startDate`/`endDate` are accepted as aliases so a form with
+  // separate date and time inputs can send either name.
+  const start = parseDateTime(startTime ?? startDate, "start");
+  const end = parseDateTime(endTime ?? endDate, "end");
+
+  if (!start) {
+    throw new ApiError(400, "Flash Sale start date/time is required.");
+  }
+
+  if (!end) {
+    throw new ApiError(400, "Flash Sale end date/time is required.");
+  }
+
+  if (end <= start) {
+    throw new ApiError(
+      400,
+      "Flash Sale end time must be after the start time."
+    );
+  }
+
+  const images = normalizeImages([
+    ...(parseImageList(req.body.images) || []),
+    ...getUploadedImages(req),
+  ]);
+
+  const productIds = parseProducts(products) || [];
+
+  if (productIds.length > 0) {
+    const found = await Product.countDocuments({ _id: { $in: productIds } });
+    if (found !== productIds.length) {
+      throw new ApiError(400, "One or more selected products don't exist.");
+    }
+  }
+
+  const percent =
+    discountPercent === undefined || discountPercent === ""
+      ? null
+      : Number(discountPercent);
+
+  if (percent !== null && (!Number.isFinite(percent) || percent < 0 || percent > 100)) {
+    throw new ApiError(400, "discountPercent must be between 0 and 100.");
+  }
+
+  const sale = await FlashSale.create({
+    title: String(title).trim(),
+    description: description ? String(description).trim() : "",
+    images,
+    discountPercent: percent,
+    products: productIds,
+    startTime: start,
+    endTime: end,
+    active: parseBool(active, true),
+    createdBy: staffStamp(req),
+    updatedBy: staffStamp(req),
+  });
+
+  res.status(201).json({
+    success: true,
+    message: "Flash Sale created successfully.",
+    flashSale: serialize(sale),
+  });
+});
+
+/* ============================================================
+   UPDATE A FLASH SALE
+   PUT /api/flash-sale/:id
    ADMIN + MANAGER
 ============================================================ */
 
 const updateFlashSale = asyncHandler(async (req, res) => {
-  const db = readDB();
+  const sale = await FlashSale.findById(req.params.id);
 
-  const currentSale = ensureFlashSale(db);
+  if (!sale) {
+    throw new ApiError(404, "Flash Sale not found.");
+  }
 
   const {
     title,
     description,
     startTime,
+    startDate,
     endTime,
+    endDate,
     active,
+    discountPercent,
+    products,
     existingImages,
-  } = req.body;
+  } = req.body || {};
 
-  /* ----------------------------------------------------------
-     Validate start time
-  ---------------------------------------------------------- */
+  if (title !== undefined) {
+    if (!String(title).trim()) {
+      throw new ApiError(400, "Flash Sale title can't be empty.");
+    }
+    sale.title = String(title).trim();
+  }
 
-  let normalizedStartTime = currentSale.startTime;
-  let normalizedEndTime = currentSale.endTime;
+  if (description !== undefined) {
+    sale.description = String(description).trim();
+  }
 
-  if (startTime !== undefined) {
-    if (startTime === "" || startTime === null) {
-      normalizedStartTime = null;
+  const rawStart = startTime ?? startDate;
+  const rawEnd = endTime ?? endDate;
+
+  if (rawStart !== undefined) {
+    const parsed = parseDateTime(rawStart, "start");
+    if (!parsed) throw new ApiError(400, "Flash Sale start date/time is required.");
+    sale.startTime = parsed;
+  }
+
+  if (rawEnd !== undefined) {
+    const parsed = parseDateTime(rawEnd, "end");
+    if (!parsed) throw new ApiError(400, "Flash Sale end date/time is required.");
+    sale.endTime = parsed;
+  }
+
+  if (sale.endTime <= sale.startTime) {
+    throw new ApiError(
+      400,
+      "Flash Sale end time must be after the start time."
+    );
+  }
+
+  if (discountPercent !== undefined) {
+    if (discountPercent === "" || discountPercent === null) {
+      sale.discountPercent = null;
     } else {
-      const parsedStart = new Date(startTime);
-
-      if (Number.isNaN(parsedStart.getTime())) {
-        throw new ApiError(
-          400,
-          "Invalid Flash Sale start date/time."
-        );
+      const percent = Number(discountPercent);
+      if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
+        throw new ApiError(400, "discountPercent must be between 0 and 100.");
       }
-
-      normalizedStartTime = parsedStart.toISOString();
+      sale.discountPercent = percent;
     }
   }
 
-  /* ----------------------------------------------------------
-     Validate end time
-  ---------------------------------------------------------- */
+  if (products !== undefined) {
+    const productIds = parseProducts(products) || [];
 
-  if (endTime !== undefined) {
-    if (endTime === "" || endTime === null) {
-      normalizedEndTime = null;
-    } else {
-      const parsedEnd = new Date(endTime);
-
-      if (Number.isNaN(parsedEnd.getTime())) {
-        throw new ApiError(
-          400,
-          "Invalid Flash Sale end date/time."
-        );
+    if (productIds.length > 0) {
+      const found = await Product.countDocuments({ _id: { $in: productIds } });
+      if (found !== productIds.length) {
+        throw new ApiError(400, "One or more selected products don't exist.");
       }
-
-      normalizedEndTime = parsedEnd.toISOString();
     }
+
+    sale.products = productIds;
   }
 
-  /* ----------------------------------------------------------
-     Validate date order
-  ---------------------------------------------------------- */
+  /* Images: keep whatever the client says to keep, then append uploads. */
+  let retained = sale.images;
 
-  if (normalizedStartTime && normalizedEndTime) {
-    const start = new Date(normalizedStartTime).getTime();
-    const end = new Date(normalizedEndTime).getTime();
+  const keepList = parseImageList(existingImages ?? req.body.images);
+  if (keepList !== null) retained = keepList;
 
-    if (end <= start) {
-      throw new ApiError(
-        400,
-        "Flash Sale end time must be after the start time."
-      );
-    }
+  sale.images = normalizeImages([...retained, ...getUploadedImages(req)]);
+
+  if (active !== undefined) {
+    sale.active = parseBool(active, sale.active);
   }
 
-  /* ----------------------------------------------------------
-     Existing images
-  ---------------------------------------------------------- */
+  sale.updatedBy = staffStamp(req);
 
-  let retainedImages = currentSale.images;
-
-  if (existingImages !== undefined) {
-    try {
-      const parsed =
-        typeof existingImages === "string"
-          ? JSON.parse(existingImages)
-          : existingImages;
-
-      retainedImages = normalizeImages(parsed);
-    } catch (error) {
-      throw new ApiError(
-        400,
-        "Invalid existingImages data."
-      );
-    }
-  }
-
-  /* ----------------------------------------------------------
-     Newly uploaded images
-  ---------------------------------------------------------- */
-
-  const uploadedImages = getUploadedImages(req);
-
-  const finalImages = normalizeImages([
-    ...retainedImages,
-    ...uploadedImages,
-  ]);
-
-  /* ----------------------------------------------------------
-     Active value
-  ---------------------------------------------------------- */
-
-  const normalizedActive =
-    active !== undefined
-      ? active === true ||
-        active === "true" ||
-        active === "1"
-      : currentSale.active;
-
-  /* ----------------------------------------------------------
-     Update DB
-  ---------------------------------------------------------- */
-
-  const updatedSale = {
-    ...currentSale,
-
-    title:
-      title !== undefined
-        ? String(title).trim()
-        : currentSale.title,
-
-    description:
-      description !== undefined
-        ? String(description).trim()
-        : currentSale.description,
-
-    images: finalImages,
-
-    startTime: normalizedStartTime,
-
-    endTime: normalizedEndTime,
-
-    active: normalizedActive,
-
-    updatedAt: new Date().toISOString(),
-
-    updatedBy: req.user
-      ? {
-          id: req.user.id,
-          name: req.user.name,
-          role: req.user.role,
-        }
-      : null,
-  };
-
-  db.flashSale = updatedSale;
-
-  writeDB(db);
-
-  /* ----------------------------------------------------------
-     Calculate current status for response
-  ---------------------------------------------------------- */
-
-  const now = Date.now();
-
-  const startTimestamp = updatedSale.startTime
-    ? new Date(updatedSale.startTime).getTime()
-    : null;
-
-  const endTimestamp = updatedSale.endTime
-    ? new Date(updatedSale.endTime).getTime()
-    : null;
-
-  let status = "inactive";
-
-  if (updatedSale.active) {
-    if (
-      startTimestamp &&
-      now < startTimestamp
-    ) {
-      status = "upcoming";
-    } else if (
-      endTimestamp &&
-      now >= endTimestamp
-    ) {
-      status = "ended";
-    } else {
-      status = "active";
-    }
-  }
+  await sale.save();
 
   res.json({
     success: true,
-
     message: "Flash Sale updated successfully.",
-
-    flashSale: {
-      ...updatedSale,
-      status,
-      isRunning: status === "active",
-    },
+    flashSale: serialize(sale),
   });
 });
 
 /* ============================================================
-   RESET FLASH SALE
+   DELETE A FLASH SALE
+   DELETE /api/flash-sale/:id
    ADMIN + MANAGER
 ============================================================ */
 
-const resetFlashSale = asyncHandler(async (req, res) => {
-  const db = readDB();
+const deleteFlashSale = asyncHandler(async (req, res) => {
+  const sale = await FlashSale.findById(req.params.id);
 
-  db.flashSale = {
-    ...DEFAULT_FLASH_SALE,
+  if (!sale) {
+    throw new ApiError(404, "Flash Sale not found.");
+  }
 
-    updatedAt: new Date().toISOString(),
-
-    updatedBy: req.user
-      ? {
-          id: req.user.id,
-          name: req.user.name,
-          role: req.user.role,
-        }
-      : null,
-  };
-
-  writeDB(db);
+  await FlashSale.deleteOne({ _id: sale._id });
 
   res.json({
     success: true,
-
-    message: "Flash Sale reset successfully.",
-
-    flashSale: {
-      ...db.flashSale,
-      status: "inactive",
-      isRunning: false,
-    },
+    message: "Flash Sale deleted successfully.",
+    id: String(sale._id),
   });
 });
 
 /* ============================================================
-   EXPORTS
+   DELETE EVERY FLASH SALE
+   DELETE /api/flash-sale
+   ADMIN + MANAGER
+   (Kept so the old "reset flash sale" button keeps working.)
 ============================================================ */
 
+const deleteAllFlashSales = asyncHandler(async (req, res) => {
+  const { deletedCount } = await FlashSale.deleteMany({});
+
+  res.json({
+    success: true,
+    message: `Removed ${deletedCount} flash sale${deletedCount === 1 ? "" : "s"}.`,
+    deletedCount,
+    flashSale: null,
+  });
+});
+
 module.exports = {
-  getFlashSale,
+  getFlashSales,
+  getActiveFlashSale,
+  getFlashSaleById,
+  createFlashSale,
   updateFlashSale,
-  resetFlashSale,
+  deleteFlashSale,
+  deleteAllFlashSales,
 };

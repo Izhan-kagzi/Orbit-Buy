@@ -1,5 +1,5 @@
 const { verifyToken } = require("../utils/jwt");
-const { readDB } = require("../config/db");
+const User = require("../models/User");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
 
@@ -19,19 +19,19 @@ const protect = asyncHandler(async (req, res, next) => {
     throw new ApiError(401, "Session expired. Please log in again.");
   }
 
-  const db = readDB();
-  const user = db.users.find((u) => u.id === decoded.id);
+  const user = await User.findById(decoded.id).lean();
 
   if (!user) {
     throw new ApiError(401, "User no longer exists.");
   }
 
   req.user = {
-    id: user.id,
+    id: String(user._id),
     name: user.name,
     email: user.email,
     role: user.role || "customer",
   };
+
   next();
 });
 
@@ -43,8 +43,9 @@ const adminOnly = (req, res, next) => {
 };
 
 // Allows both admins and managers — used for order/cancellation
-// management, which managers can handle without needing full admin
-// access to products, coupons, or manager accounts themselves.
+// management, product edits, flash sales and review moderation, which
+// managers handle without needing full admin access to coupons or
+// manager accounts themselves.
 const staffOnly = (req, res, next) => {
   if (!req.user || !["admin", "manager"].includes(req.user.role)) {
     throw new ApiError(403, "Staff access required.");
@@ -52,4 +53,30 @@ const staffOnly = (req, res, next) => {
   next();
 };
 
-module.exports = { protect, adminOnly, staffOnly };
+// Attaches req.user when a valid token is present, but never rejects —
+// used by public endpoints that show extra data to signed-in staff.
+const optionalAuth = asyncHandler(async (req, res, next) => {
+  const authHeader = req.headers.authorization || "";
+
+  if (!authHeader.startsWith("Bearer ")) return next();
+
+  try {
+    const decoded = verifyToken(authHeader.split(" ")[1]);
+    const user = await User.findById(decoded.id).lean();
+
+    if (user) {
+      req.user = {
+        id: String(user._id),
+        name: user.name,
+        email: user.email,
+        role: user.role || "customer",
+      };
+    }
+  } catch (error) {
+    // Ignore — the route is public.
+  }
+
+  next();
+});
+
+module.exports = { protect, adminOnly, staffOnly, optionalAuth };

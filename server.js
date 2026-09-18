@@ -1,24 +1,56 @@
-// Load environment variables from .env
+// Load environment variables from .env before anything else reads them.
 require("dotenv").config();
 
-// Import your Express app
 const app = require("./src/app");
+const { connectDB, disconnectDB } = require("./src/config/db");
 
-// Import DB connection test (optional)
-const { testConnection } = require("./src/config/mysql");
-
-// Define port (default to 5000 if not set)
 const PORT = process.env.PORT || 5000;
 
-// Test database connection once at startup
-testConnection();
+let server;
 
-// Start the server
-app.listen(PORT, "0.0.0.0",async () => {
-  console.log(`🛒 Orbit Buy API running on http://localhost:${PORT}`);
+async function start() {
   try {
-    await testConnection();
+    // Connect to MongoDB first — starting the HTTP server before the
+    // database is up just produces a wall of failing requests.
+    await connectDB();
   } catch (error) {
-    console.error("Database connection could not be established.");
+    console.error(
+      "Startup aborted: could not connect to MongoDB. Is mongod running?"
+    );
+    process.exit(1);
   }
+
+  server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`🛒 Orbit Buy API running on http://localhost:${PORT}`);
+  });
+}
+
+start();
+
+/* ============================================================
+   GRACEFUL SHUTDOWN + CRASH SAFETY
+============================================================ */
+
+async function shutdown(signal) {
+  console.log(`\n${signal} received. Shutting down...`);
+
+  if (server) {
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  await disconnectDB();
+  process.exit(0);
+}
+
+["SIGINT", "SIGTERM"].forEach((signal) => {
+  process.on(signal, () => shutdown(signal));
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection:", reason);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception:", error);
+  process.exit(1);
 });

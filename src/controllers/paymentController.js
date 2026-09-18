@@ -1,6 +1,9 @@
-const { readDB } = require("../config/db");
 const { buildCartResponse } = require("./cartController");
-const { findActiveCoupon, computeDiscount, couponStatus } = require("./couponController");
+const {
+  findActiveCoupon,
+  computeDiscount,
+  couponStatus,
+} = require("./couponController");
 const { calculateTotals } = require("../utils/pricing");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
@@ -27,8 +30,7 @@ const createPaymentIntent = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   const { couponCode } = req.body;
 
-  const db = readDB();
-  const { items, subtotal } = buildCartResponse(db, req.user.id);
+  const { items, subtotal } = await buildCartResponse(req.user.id);
 
   if (items.length === 0) {
     throw new ApiError(400, "Your cart is empty.");
@@ -36,7 +38,7 @@ const createPaymentIntent = asyncHandler(async (req, res) => {
 
   let discount = 0;
   if (couponCode) {
-    const coupon = findActiveCoupon(db, couponCode);
+    const coupon = await findActiveCoupon(couponCode);
     if (coupon && couponStatus(coupon) === "active") {
       discount = computeDiscount(coupon, subtotal);
     }

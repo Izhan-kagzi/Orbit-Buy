@@ -1,36 +1,39 @@
 const bcrypt = require("bcryptjs");
-const crypto = require("crypto");
 
-const { readDB, writeDB } = require("../config/db");
+const User = require("../models/User");
+const Cart = require("../models/Cart");
+const Wishlist = require("../models/Wishlist");
+const Review = require("../models/Review");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function sanitizeUser(user) {
-  const { password, ...safe } = user;
-  return safe;
-}
-
-// @route GET /api/users  (admin only) — everyone, for the admin to
-// browse and decide who to promote/demote.
+// @route GET /api/users  (admin only)
 const getAllUsers = asyncHandler(async (req, res) => {
-  const db = readDB();
-  const users = db.users.map(sanitizeUser);
-  res.json({ success: true, count: users.length, users });
+  const users = await User.find().sort({ createdAt: -1 });
+
+  res.json({
+    success: true,
+    count: users.length,
+    users: users.map((u) => u.toJSON()),
+  });
 });
 
 // @route GET /api/users/managers  (admin only)
 const getManagers = asyncHandler(async (req, res) => {
-  const db = readDB();
-  const managers = db.users.filter((u) => u.role === "manager").map(sanitizeUser);
-  res.json({ success: true, count: managers.length, managers });
+  const managers = await User.find({ role: "manager" }).sort({ createdAt: -1 });
+
+  res.json({
+    success: true,
+    count: managers.length,
+    managers: managers.map((u) => u.toJSON()),
+  });
 });
 
 // @route PUT /api/users/:id/role  (admin only)  { role: "manager" | "customer" }
-// Deliberately does NOT accept "admin" here — promoting someone to
-// full admin isn't something this endpoint should allow, to avoid
-// accidental privilege escalation through the manager-management UI.
+// Deliberately does NOT accept "admin" — promoting someone to full
+// admin isn't something this endpoint should allow.
 const setUserRole = asyncHandler(async (req, res) => {
   const { role } = req.body;
 
@@ -38,8 +41,7 @@ const setUserRole = asyncHandler(async (req, res) => {
     throw new ApiError(400, 'role must be "manager" or "customer".');
   }
 
-  const db = readDB();
-  const user = db.users.find((u) => u.id === req.params.id);
+  const user = await User.findById(req.params.id);
 
   if (!user) {
     throw new ApiError(404, "User not found.");
@@ -49,21 +51,19 @@ const setUserRole = asyncHandler(async (req, res) => {
     throw new ApiError(403, "Admin accounts can't be modified here.");
   }
 
-  if (user.id === req.user.id) {
+  if (String(user._id) === req.user.id) {
     throw new ApiError(400, "You can't change your own role.");
   }
 
   user.role = role;
-  writeDB(db);
+  await user.save();
 
-  res.json({ success: true, user: sanitizeUser(user) });
+  res.json({ success: true, user: user.toJSON() });
 });
 
 // @route POST /api/users/managers  (admin only)  { name, email, password }
-// Creates a brand-new manager account directly, instead of promoting
-// an existing customer.
 const createManager = asyncHandler(async (req, res) => {
-  const { name, email, password } = req.body;
+  const { name, email, password, mobile } = req.body;
 
   if (!name || !email || !password) {
     throw new ApiError(400, "Name, email and password are required.");
@@ -73,46 +73,36 @@ const createManager = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Please enter a valid email address.");
   }
 
-  if (password.length < 6) {
+  if (String(password).length < 6) {
     throw new ApiError(400, "Password must be at least 6 characters long.");
   }
 
-  const db = readDB();
+  const normalizedEmail = String(email).toLowerCase().trim();
 
-  const existing = db.users.find(
-    (u) => u.email.toLowerCase() === email.toLowerCase()
-  );
-
+  const existing = await User.findOne({ email: normalizedEmail }).lean();
   if (existing) {
     throw new ApiError(409, "An account with this email already exists.");
   }
 
-  const hashedPassword = await bcrypt.hash(password, 10);
-
-  const newManager = {
-    id: crypto.randomUUID(),
-    name,
-    email: email.toLowerCase(),
-    password: hashedPassword,
-    mobile: "",
+  const manager = await User.create({
+    name: String(name).trim(),
+    email: normalizedEmail,
+    password: await bcrypt.hash(password, 10),
+    mobile: mobile || "",
     role: "manager",
-    createdAt: new Date().toISOString(),
-  };
+  });
 
-  db.users.push(newManager);
-  db.carts[newManager.id] = [];
-  db.wishlists[newManager.id] = [];
-  writeDB(db);
+  await Promise.all([
+    Cart.create({ user: manager._id, items: [] }),
+    Wishlist.create({ user: manager._id, products: [] }),
+  ]);
 
-  res.status(201).json({ success: true, user: sanitizeUser(newManager) });
+  res.status(201).json({ success: true, user: manager.toJSON() });
 });
 
 // @route DELETE /api/users/:id  (admin only)
-// Permanently deletes a manager (or customer) account. Admin accounts
-// and the caller's own account can't be deleted here.
 const deleteUser = asyncHandler(async (req, res) => {
-  const db = readDB();
-  const user = db.users.find((u) => u.id === req.params.id);
+  const user = await User.findById(req.params.id);
 
   if (!user) {
     throw new ApiError(404, "User not found.");
@@ -122,14 +112,18 @@ const deleteUser = asyncHandler(async (req, res) => {
     throw new ApiError(403, "Admin accounts can't be deleted here.");
   }
 
-  if (user.id === req.user.id) {
+  if (String(user._id) === req.user.id) {
     throw new ApiError(400, "You can't delete your own account.");
   }
 
-  db.users = db.users.filter((u) => u.id !== req.params.id);
-  delete db.carts[req.params.id];
-  delete db.wishlists[req.params.id];
-  writeDB(db);
+  // Clean up everything that belonged to the account. Orders are kept
+  // on purpose — they're financial records.
+  await Promise.all([
+    User.deleteOne({ _id: user._id }),
+    Cart.deleteOne({ user: user._id }),
+    Wishlist.deleteOne({ user: user._id }),
+    Review.deleteMany({ userId: user._id }),
+  ]);
 
   res.json({ success: true, message: "User deleted." });
 });
