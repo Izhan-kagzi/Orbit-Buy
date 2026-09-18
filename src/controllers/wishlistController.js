@@ -1,16 +1,28 @@
-const { readDB, writeDB } = require("../config/db");
+const Wishlist = require("../models/Wishlist");
+const Product = require("../models/Product");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
 
-function buildWishlistResponse(db, userId) {
-  const ids = db.wishlists[userId] || [];
-  return db.products.filter((p) => ids.includes(p.id));
+async function buildWishlistResponse(userId) {
+  const wishlist = await Wishlist.findOne({ user: userId }).lean();
+  const ids = wishlist?.products || [];
+
+  if (ids.length === 0) return [];
+
+  const products = await Product.find({ _id: { $in: ids } });
+
+  // Preserve the order the customer added them in.
+  const byId = new Map(products.map((p) => [String(p._id), p.toJSON()]));
+
+  return ids.map((id) => byId.get(String(id))).filter(Boolean);
 }
 
 // @route GET /api/wishlist
 const getWishlist = asyncHandler(async (req, res) => {
-  const db = readDB();
-  res.json({ success: true, wishlist: buildWishlistResponse(db, req.user.id) });
+  res.json({
+    success: true,
+    wishlist: await buildWishlistResponse(req.user.id),
+  });
 });
 
 // @route POST /api/wishlist  { productId }
@@ -21,36 +33,41 @@ const addToWishlist = asyncHandler(async (req, res) => {
     throw new ApiError(400, "productId is required.");
   }
 
-  const db = readDB();
-  const product = db.products.find((p) => p.id === productId);
+  const product = await Product.findById(productId).lean();
 
   if (!product) {
     throw new ApiError(404, "Product not found.");
   }
 
-  if (!db.wishlists[req.user.id]) db.wishlists[req.user.id] = [];
+  // $addToSet keeps it idempotent — adding twice is harmless.
+  await Wishlist.updateOne(
+    { user: req.user.id },
+    { $addToSet: { products: String(productId) } },
+    { upsert: true }
+  );
 
-  if (!db.wishlists[req.user.id].includes(productId)) {
-    db.wishlists[req.user.id].push(productId);
-    writeDB(db);
-  }
-
-  res
-    .status(201)
-    .json({ success: true, wishlist: buildWishlistResponse(db, req.user.id) });
+  res.status(201).json({
+    success: true,
+    wishlist: await buildWishlistResponse(req.user.id),
+  });
 });
 
 // @route DELETE /api/wishlist/:productId
 const removeFromWishlist = asyncHandler(async (req, res) => {
-  const { productId } = req.params;
-
-  const db = readDB();
-  db.wishlists[req.user.id] = (db.wishlists[req.user.id] || []).filter(
-    (id) => id !== productId
+  await Wishlist.updateOne(
+    { user: req.user.id },
+    { $pull: { products: String(req.params.productId) } }
   );
-  writeDB(db);
 
-  res.json({ success: true, wishlist: buildWishlistResponse(db, req.user.id) });
+  res.json({
+    success: true,
+    wishlist: await buildWishlistResponse(req.user.id),
+  });
 });
 
-module.exports = { getWishlist, addToWishlist, removeFromWishlist };
+module.exports = {
+  getWishlist,
+  addToWishlist,
+  removeFromWishlist,
+  buildWishlistResponse,
+};

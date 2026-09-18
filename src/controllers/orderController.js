@@ -1,6 +1,7 @@
-const crypto = require("crypto");
-
-const { readDB, writeDB } = require("../config/db");
+const Order = require("../models/Order");
+const Product = require("../models/Product");
+const User = require("../models/User");
+const Cart = require("../models/Cart");
 const { buildCartResponse } = require("./cartController");
 const {
   findActiveCoupon,
@@ -12,14 +13,19 @@ const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
 
 const PAYMENT_METHODS = ["cod", "card", "upi", "netbanking"];
+const ORDER_STATUSES = [
+  "Confirmed",
+  "Processing",
+  "Shipped",
+  "Delivered",
+  "Cancelled",
+];
 
-function generateOrderId() {
-  return "OB" + Math.floor(100000 + Math.random() * 900000);
-}
-
-// @route POST /api/orders  { paymentMethod, couponCode, shippingAddress, paymentIntentId }
+// @route POST /api/orders
+// { paymentMethod, couponCode, shippingAddress, paymentIntentId }
 const placeOrder = asyncHandler(async (req, res) => {
-  const { paymentMethod, couponCode, shippingAddress, paymentIntentId } = req.body;
+  const { paymentMethod, couponCode, shippingAddress, paymentIntentId } =
+    req.body;
 
   if (!paymentMethod || !PAYMENT_METHODS.includes(paymentMethod)) {
     throw new ApiError(400, "A valid payment method is required.");
@@ -38,16 +44,21 @@ const placeOrder = asyncHandler(async (req, res) => {
     );
   }
 
-  const db = readDB();
-  const { items, subtotal } = buildCartResponse(db, req.user.id);
+  const { items, subtotal } = await buildCartResponse(req.user.id);
 
   if (items.length === 0) {
     throw new ApiError(400, "Your cart is empty.");
   }
 
   // Re-validate stock server-side — never trust the client's cart snapshot.
+  const products = await Product.find({
+    _id: { $in: items.map((item) => item.id) },
+  });
+
+  const productMap = new Map(products.map((p) => [String(p._id), p]));
+
   for (const item of items) {
-    const product = db.products.find((p) => p.id === item.id);
+    const product = productMap.get(String(item.id));
     if (!product || product.stock < item.quantity) {
       throw new ApiError(
         409,
@@ -59,8 +70,10 @@ const placeOrder = asyncHandler(async (req, res) => {
   }
 
   let discount = 0;
+  let appliedCode = null;
+
   if (couponCode) {
-    const coupon = findActiveCoupon(db, couponCode);
+    const coupon = await findActiveCoupon(couponCode);
     const status = coupon ? couponStatus(coupon) : null;
 
     if (!coupon || status !== "active") {
@@ -68,6 +81,7 @@ const placeOrder = asyncHandler(async (req, res) => {
     }
 
     discount = computeDiscount(coupon, subtotal);
+    appliedCode = coupon.code;
   }
 
   const { shipping, tax, total } = calculateTotals(subtotal, discount);
@@ -101,16 +115,22 @@ const placeOrder = asyncHandler(async (req, res) => {
         "The paid amount doesn't match this order's total. Please contact support."
       );
     }
+
+    // Reject a PaymentIntent that has already been used for an order.
+    const reused = await Order.exists({ paymentIntentId });
+    if (reused) {
+      throw new ApiError(409, "This payment has already been used for an order.");
+    }
   }
 
   // Decrement stock now that the order is confirmed.
-  items.forEach((item) => {
-    const product = db.products.find((p) => p.id === item.id);
-    if (product) product.stock -= item.quantity;
-  });
+  await Promise.all(
+    items.map((item) =>
+      Product.updateOne({ _id: item.id }, { $inc: { stock: -item.quantity } })
+    )
+  );
 
-  const order = {
-    id: generateOrderId(),
+  const order = await Order.create({
     userId: req.user.id,
     items,
     subtotal,
@@ -118,86 +138,156 @@ const placeOrder = asyncHandler(async (req, res) => {
     tax,
     discount,
     total,
+    couponCode: appliedCode,
     paymentMethod,
     paymentIntentId: paymentMethod === "card" ? paymentIntentId : null,
     paymentStatus: paymentMethod === "card" ? "Paid" : "Pending",
     shippingAddress,
     status: "Confirmed",
     cancellation: {
-      status: null, // null | "requested" | "approved" | "rejected"
+      status: null,
       reason: null,
       requestedAt: null,
       resolvedAt: null,
       resolvedBy: null,
     },
-    createdAt: new Date().toISOString(),
-  };
+  });
 
-  db.orders.unshift(order);
-  db.carts[req.user.id] = [];
-  writeDB(db);
+  await Cart.updateOne({ user: req.user.id }, { $set: { items: [] } });
 
-  res.status(201).json({ success: true, order });
+  res.status(201).json({ success: true, order: order.toJSON() });
 });
 
 // @route GET /api/orders
 const getMyOrders = asyncHandler(async (req, res) => {
-  const db = readDB();
-  const orders = db.orders.filter((o) => o.userId === req.user.id);
-  res.json({ success: true, count: orders.length, orders });
+  const orders = await Order.find({ userId: req.user.id }).sort({
+    createdAt: -1,
+  });
+
+  res.json({
+    success: true,
+    count: orders.length,
+    orders: orders.map((o) => o.toJSON()),
+  });
 });
 
 // @route GET /api/orders/:id
 const getOrderById = asyncHandler(async (req, res) => {
-  const db = readDB();
-  const order = db.orders.find(
-    (o) => o.id === req.params.id && o.userId === req.user.id
-  );
+  const order = await Order.findById(req.params.id);
 
   if (!order) {
     throw new ApiError(404, "Order not found.");
   }
 
-  res.json({ success: true, order });
+  const isStaff = ["admin", "manager"].includes(req.user.role);
+
+  if (String(order.userId) !== req.user.id && !isStaff) {
+    throw new ApiError(404, "Order not found.");
+  }
+
+  res.json({ success: true, order: order.toJSON() });
 });
 
-// @route GET /api/orders/admin/all  (admin only)
+// @route GET /api/orders/admin/all  (staff)
 const getAllOrders = asyncHandler(async (req, res) => {
-  const db = readDB();
+  const orders = await Order.find().sort({ createdAt: -1 });
 
-  const orders = db.orders.map((order) => {
-    const user = db.users.find((u) => u.id === order.userId);
+  const users = await User.find({
+    _id: { $in: [...new Set(orders.map((o) => o.userId))] },
+  }).lean();
+
+  const userMap = new Map(users.map((u) => [String(u._id), u]));
+
+  const result = orders.map((order) => {
+    const user = userMap.get(String(order.userId));
     return {
-      ...order,
+      ...order.toJSON(),
       customer: user
         ? { name: user.name, email: user.email, mobile: user.mobile }
         : null,
     };
   });
 
-  res.json({ success: true, count: orders.length, orders });
+  res.json({ success: true, count: result.length, orders: result });
 });
 
-// @route GET /api/orders/admin/stats  (admin only)
-const getStats = asyncHandler(async (req, res) => {
-  const db = readDB();
+// @route PUT /api/orders/:id/status  (staff)  { status }
+const updateOrderStatus = asyncHandler(async (req, res) => {
+  const { status } = req.body;
 
-  const totalRevenue = db.orders.reduce(
-    (sum, order) => sum + (order.total || 0),
-    0
-  );
+  if (!ORDER_STATUSES.includes(status)) {
+    throw new ApiError(
+      400,
+      `status must be one of: ${ORDER_STATUSES.join(", ")}`
+    );
+  }
+
+  const order = await Order.findById(req.params.id);
+
+  if (!order) {
+    throw new ApiError(404, "Order not found.");
+  }
+
+  if (order.status === "Cancelled" && status !== "Cancelled") {
+    throw new ApiError(400, "A cancelled order can't be reopened.");
+  }
+
+  // Cancelling from the admin panel restocks the items too.
+  if (status === "Cancelled" && order.status !== "Cancelled") {
+    await Promise.all(
+      order.items.map((item) =>
+        Product.updateOne({ _id: item.id }, { $inc: { stock: item.quantity } })
+      )
+    );
+  }
+
+  order.status = status;
+
+  if (status === "Delivered" && order.paymentMethod === "cod") {
+    order.paymentStatus = "Paid";
+  }
+
+  await order.save();
+
+  res.json({ success: true, order: order.toJSON() });
+});
+
+// @route GET /api/orders/admin/stats  (staff)
+const getStats = asyncHandler(async (req, res) => {
+  const [
+    totalProducts,
+    totalOrders,
+    totalUsers,
+    revenueAgg,
+    lowStockProducts,
+    outOfStockProducts,
+    pendingCancellations,
+  ] = await Promise.all([
+    Product.countDocuments(),
+    Order.countDocuments(),
+    User.countDocuments(),
+    // Cancelled orders never count towards revenue.
+    Order.aggregate([
+      { $match: { status: { $ne: "Cancelled" } } },
+      { $group: { _id: null, total: { $sum: "$total" } } },
+    ]),
+    Product.countDocuments({ stock: { $gt: 0, $lte: 5 } }),
+    Product.countDocuments({ stock: { $lte: 0 } }),
+    Order.countDocuments({ "cancellation.status": "requested" }),
+  ]);
+
+  const totalRevenue = revenueAgg[0]?.total || 0;
 
   res.json({
     success: true,
     stats: {
-      totalProducts: db.products.length,
-      totalOrders: db.orders.length,
-      totalUsers: db.users.length,
+      totalProducts,
+      totalOrders,
+      totalUsers,
       totalRevenue: Number(totalRevenue.toFixed(2)),
-      lowStockProducts: db.products.filter(
-        (p) => p.stock > 0 && p.stock <= 5
-      ).length,
-      outOfStockProducts: db.products.filter((p) => p.stock <= 0).length,
+      lowStockProducts,
+      outOfStockProducts,
+      pendingCancellations,
     },
   });
 });
@@ -208,30 +298,23 @@ const MONTH_NAMES = [
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-// @route GET /api/orders/admin/sales?period=weekly|monthly|yearly  (admin only)
+// @route GET /api/orders/admin/sales?period=weekly|monthly|yearly  (staff)
 const getSalesStats = asyncHandler(async (req, res) => {
-  const db = readDB();
   const period = req.query.period || "weekly";
   const now = new Date();
 
-  let buckets = [];
+  const buckets = [];
 
   if (period === "weekly") {
-    // Last 7 days, one bucket per day.
     for (let i = 6; i >= 0; i--) {
       const day = new Date(now.getTime() - i * DAY_MS);
       buckets.push({
         label: day.toLocaleDateString("en-US", { weekday: "short" }),
         start: new Date(day.getFullYear(), day.getMonth(), day.getDate()),
-        end: new Date(
-          day.getFullYear(),
-          day.getMonth(),
-          day.getDate() + 1
-        ),
+        end: new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1),
       });
     }
   } else if (period === "monthly") {
-    // Current month, one bucket per week (up to 5).
     const year = now.getFullYear();
     const month = now.getMonth();
     const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -249,7 +332,6 @@ const getSalesStats = asyncHandler(async (req, res) => {
       weekNum += 1;
     }
   } else if (period === "yearly") {
-    // Current year, one bucket per month.
     const year = now.getFullYear();
     for (let m = 0; m < 12; m++) {
       buckets.push({
@@ -262,8 +344,18 @@ const getSalesStats = asyncHandler(async (req, res) => {
     throw new ApiError(400, "period must be weekly, monthly, or yearly.");
   }
 
+  const rangeStart = buckets[0].start;
+  const rangeEnd = buckets[buckets.length - 1].end;
+
+  const orders = await Order.find({
+    status: { $ne: "Cancelled" },
+    createdAt: { $gte: rangeStart, $lt: rangeEnd },
+  })
+    .select("total createdAt")
+    .lean();
+
   const data = buckets.map(({ label, start, end }) => {
-    const ordersInBucket = db.orders.filter((o) => {
+    const ordersInBucket = orders.filter((o) => {
       const created = new Date(o.createdAt);
       return created >= start && created < end;
     });
@@ -282,39 +374,34 @@ const getSalesStats = asyncHandler(async (req, res) => {
   );
   const totalOrders = data.reduce((sum, d) => sum + d.orders, 0);
 
-  // Percentage change vs the previous equivalent period, for the
-  // "+40% vs last week" style indicator.
-  let previousTotal = 0;
+  // Percentage change vs the previous equivalent period.
+  let prevStart;
+  let prevEnd;
+
   if (period === "weekly") {
-    const prevStart = new Date(now.getTime() - 13 * DAY_MS);
-    const prevEnd = new Date(now.getTime() - 6 * DAY_MS);
-    previousTotal = db.orders
-      .filter((o) => {
-        const created = new Date(o.createdAt);
-        return created >= prevStart && created < prevEnd;
-      })
-      .reduce((sum, o) => sum + (o.total || 0), 0);
+    prevStart = new Date(rangeStart.getTime() - 7 * DAY_MS);
+    prevEnd = rangeStart;
   } else if (period === "monthly") {
     const year = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
     const month = now.getMonth() === 0 ? 11 : now.getMonth() - 1;
-    const prevStart = new Date(year, month, 1);
-    const prevEnd = new Date(year, month + 1, 1);
-    previousTotal = db.orders
-      .filter((o) => {
-        const created = new Date(o.createdAt);
-        return created >= prevStart && created < prevEnd;
-      })
-      .reduce((sum, o) => sum + (o.total || 0), 0);
+    prevStart = new Date(year, month, 1);
+    prevEnd = new Date(year, month + 1, 1);
   } else {
-    const prevStart = new Date(now.getFullYear() - 1, 0, 1);
-    const prevEnd = new Date(now.getFullYear(), 0, 1);
-    previousTotal = db.orders
-      .filter((o) => {
-        const created = new Date(o.createdAt);
-        return created >= prevStart && created < prevEnd;
-      })
-      .reduce((sum, o) => sum + (o.total || 0), 0);
+    prevStart = new Date(now.getFullYear() - 1, 0, 1);
+    prevEnd = new Date(now.getFullYear(), 0, 1);
   }
+
+  const [prevAgg] = await Order.aggregate([
+    {
+      $match: {
+        status: { $ne: "Cancelled" },
+        createdAt: { $gte: prevStart, $lt: prevEnd },
+      },
+    },
+    { $group: { _id: null, total: { $sum: "$total" } } },
+  ]);
+
+  const previousTotal = prevAgg?.total || 0;
 
   const changePercent =
     previousTotal > 0
@@ -335,15 +422,14 @@ const getSalesStats = asyncHandler(async (req, res) => {
 
 // @route POST /api/orders/:id/request-cancellation  { reason }
 // The customer applies for cancellation — this does NOT cancel the
-// order by itself. It only flags it for a manager or admin to review
-// and approve/reject.
+// order by itself. It only flags it for a manager or admin to review.
 const requestCancellation = asyncHandler(async (req, res) => {
   const { reason } = req.body;
 
-  const db = readDB();
-  const order = db.orders.find(
-    (o) => o.id === req.params.id && o.userId === req.user.id
-  );
+  const order = await Order.findOne({
+    _id: req.params.id,
+    userId: req.user.id,
+  });
 
   if (!order) {
     throw new ApiError(404, "Order not found.");
@@ -353,43 +439,59 @@ const requestCancellation = asyncHandler(async (req, res) => {
     throw new ApiError(400, "This order is already cancelled.");
   }
 
+  if (order.status === "Delivered") {
+    throw new ApiError(
+      400,
+      "This order has already been delivered and can't be cancelled."
+    );
+  }
+
   if (order.cancellation?.status === "requested") {
-    throw new ApiError(400, "A cancellation request is already pending for this order.");
+    throw new ApiError(
+      400,
+      "A cancellation request is already pending for this order."
+    );
   }
 
   order.cancellation = {
     status: "requested",
     reason: reason || "",
-    requestedAt: new Date().toISOString(),
+    requestedAt: new Date(),
     resolvedAt: null,
     resolvedBy: null,
   };
 
-  writeDB(db);
+  await order.save();
 
-  res.json({ success: true, order });
+  res.json({ success: true, order: order.toJSON() });
 });
 
-// @route GET /api/orders/admin/cancellations  (staff: admin or manager)
+// @route GET /api/orders/admin/cancellations  (staff)
 const getCancellationRequests = asyncHandler(async (req, res) => {
-  const db = readDB();
+  const orders = await Order.find({
+    "cancellation.status": "requested",
+  }).sort({ "cancellation.requestedAt": -1 });
 
-  const requests = db.orders
-    .filter((o) => o.cancellation?.status === "requested")
-    .map((order) => {
-      const user = db.users.find((u) => u.id === order.userId);
-      return {
-        ...order,
-        customer: user
-          ? { name: user.name, email: user.email, mobile: user.mobile }
-          : null,
-      };
-    });
+  const users = await User.find({
+    _id: { $in: [...new Set(orders.map((o) => o.userId))] },
+  }).lean();
 
-  res.json({ success: true, count: requests.length, orders: requests });
+  const userMap = new Map(users.map((u) => [String(u._id), u]));
+
+  const result = orders.map((order) => {
+    const user = userMap.get(String(order.userId));
+    return {
+      ...order.toJSON(),
+      customer: user
+        ? { name: user.name, email: user.email, mobile: user.mobile }
+        : null,
+    };
+  });
+
+  res.json({ success: true, count: result.length, orders: result });
 });
 
-// @route PUT /api/orders/:id/cancellation  (staff: admin or manager)  { action: "approve" | "reject" }
+// @route PUT /api/orders/:id/cancellation  (staff)  { action: "approve" | "reject" }
 const resolveCancellation = asyncHandler(async (req, res) => {
   const { action } = req.body;
 
@@ -397,8 +499,7 @@ const resolveCancellation = asyncHandler(async (req, res) => {
     throw new ApiError(400, 'action must be "approve" or "reject".');
   }
 
-  const db = readDB();
-  const order = db.orders.find((o) => o.id === req.params.id);
+  const order = await Order.findById(req.params.id);
 
   if (!order) {
     throw new ApiError(404, "Order not found.");
@@ -410,23 +511,28 @@ const resolveCancellation = asyncHandler(async (req, res) => {
 
   if (action === "approve") {
     // Restock the cancelled items.
-    order.items.forEach((item) => {
-      const product = db.products.find((p) => p.id === item.id);
-      if (product) product.stock += item.quantity;
-    });
+    await Promise.all(
+      order.items.map((item) =>
+        Product.updateOne({ _id: item.id }, { $inc: { stock: item.quantity } })
+      )
+    );
 
     order.status = "Cancelled";
     order.cancellation.status = "approved";
+
+    if (order.paymentStatus === "Paid") {
+      order.paymentStatus = "Refunded";
+    }
   } else {
     order.cancellation.status = "rejected";
   }
 
-  order.cancellation.resolvedAt = new Date().toISOString();
+  order.cancellation.resolvedAt = new Date();
   order.cancellation.resolvedBy = req.user.name;
 
-  writeDB(db);
+  await order.save();
 
-  res.json({ success: true, order });
+  res.json({ success: true, order: order.toJSON() });
 });
 
 module.exports = {
@@ -434,6 +540,7 @@ module.exports = {
   getMyOrders,
   getOrderById,
   getAllOrders,
+  updateOrderStatus,
   getStats,
   getSalesStats,
   requestCancellation,
