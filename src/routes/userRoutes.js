@@ -2,6 +2,7 @@ const express = require("express");
 const {
   getAllUsers,
   getManagers,
+  getManagerActivity,
   setUserRole,
   createManager,
   deleteUser,
@@ -14,6 +15,7 @@ router.use(protect, adminOnly);
 
 router.get("/", getAllUsers);
 router.get("/managers", getManagers);
+router.get("/managers/:id/activity", getManagerActivity);
 router.post("/managers", createManager);
 router.put("/:id/role", setUserRole);
 router.delete("/:id", deleteUser);

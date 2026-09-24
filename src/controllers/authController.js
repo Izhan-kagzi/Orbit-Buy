@@ -6,6 +6,8 @@ const Wishlist = require("../models/Wishlist");
 const { signToken } = require("../utils/jwt");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
+const ActivityLog = require("../models/ActivityLog");
+const crypto = require("crypto");
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -80,13 +82,78 @@ const login = asyncHandler(async (req, res) => {
     throw new ApiError(401, "Invalid email or password.");
   }
 
-  const token = signToken({ id: user._id });
+  const sessionId = user.role === "manager" ? crypto.randomUUID() : null;
+  const token = signToken({ id: user._id, sessionId });
+
+  // Each login creates a session record so admins can see historical
+  // login/logout times even after the manager has logged out.
+  const now = new Date();
+
+  if (user.role === "manager") {
+    user.currentSessionId = sessionId;
+    user.currentLoginAt = now;
+    user.lastSeenAt = now;
+    user.lastLogoutAt = null;
+    await user.save();
+
+    await ActivityLog.create({
+      user: user._id,
+      sessionId,
+      type: "login",
+      action: "Manager logged in",
+      ip: req.ip,
+      userAgent: req.get("user-agent") || null,
+    });
+  }
 
   res.json({
     success: true,
     token,
     user: user.toJSON(),
   });
+});
+
+// @route POST /api/auth/logout
+const logout = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user.id);
+
+  if (user?.role === "manager") {
+    const sessionId = req.sessionId || user.currentSessionId || crypto.randomUUID();
+    const now = new Date();
+
+    await ActivityLog.create({
+      user: user._id,
+      sessionId,
+      type: "logout",
+      action: "Manager logged out",
+      ip: req.ip,
+      userAgent: req.get("user-agent") || null,
+    });
+
+    user.lastLogoutAt = now;
+    if (user.currentSessionId === sessionId) {
+      user.lastSeenAt = now;
+      user.currentSessionId = null;
+      user.currentLoginAt = null;
+    }
+    await user.save();
+  }
+
+  res.json({ success: true, message: "Logged out successfully." });
+});
+
+// @route POST /api/auth/heartbeat
+const heartbeat = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user.id);
+
+  if (user?.role === "manager" && req.sessionId) {
+    if (user.currentSessionId === req.sessionId) {
+      user.lastSeenAt = new Date();
+      await user.save();
+    }
+  }
+
+  res.json({ success: true });
 });
 
 // @route GET /api/auth/me
@@ -153,4 +220,4 @@ const changePassword = asyncHandler(async (req, res) => {
   res.json({ success: true, message: "Password updated successfully." });
 });
 
-module.exports = { register, login, getMe, updateMe, changePassword };
+module.exports = { register, login, logout, heartbeat, getMe, updateMe, changePassword };

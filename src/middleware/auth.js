@@ -2,6 +2,7 @@ const { verifyToken } = require("../utils/jwt");
 const User = require("../models/User");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
+const ActivityLog = require("../models/ActivityLog");
 
 const protect = asyncHandler(async (req, res, next) => {
   const authHeader = req.headers.authorization || "";
@@ -31,6 +32,29 @@ const protect = asyncHandler(async (req, res, next) => {
     email: user.email,
     role: user.role || "customer",
   };
+  req.sessionId = decoded.sessionId || user.currentSessionId || null;
+
+  // Record manager activity centrally. This covers manager actions across
+  // products, orders, reviews, flash sales, etc., without changing every controller.
+  if (req.user.role === "manager" && req.sessionId) {
+    const now = new Date();
+    await Promise.all([
+      ActivityLog.create({
+        user: user._id,
+        sessionId: req.sessionId,
+        type: "activity",
+        method: req.method,
+        path: req.originalUrl,
+        action: `${req.method} ${req.originalUrl}`,
+        ip: req.ip,
+        userAgent: req.get("user-agent") || null,
+      }),
+      User.updateOne(
+        { _id: user._id, currentSessionId: req.sessionId },
+        { $set: { lastSeenAt: now } }
+      ),
+    ]);
+  }
 
   next();
 });

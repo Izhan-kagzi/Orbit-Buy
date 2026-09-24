@@ -6,6 +6,7 @@ const Wishlist = require("../models/Wishlist");
 const Review = require("../models/Review");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
+const ActivityLog = require("../models/ActivityLog");
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -22,12 +23,67 @@ const getAllUsers = asyncHandler(async (req, res) => {
 
 // @route GET /api/users/managers  (admin only)
 const getManagers = asyncHandler(async (req, res) => {
-  const managers = await User.find({ role: "manager" }).sort({ createdAt: -1 });
+  const managers = await User.find({ role: "manager" }).sort({ createdAt: -1 }).lean();
 
   res.json({
     success: true,
     count: managers.length,
-    managers: managers.map((u) => u.toJSON()),
+    managers: managers.map((u) => ({
+      ...u,
+      id: String(u._id),
+      _id: undefined,
+      online: Boolean(
+        u.currentSessionId &&
+          u.lastSeenAt &&
+          Date.now() - new Date(u.lastSeenAt).getTime() < 2 * 60 * 1000
+      ),
+      currentSessionId: u.currentSessionId || null,
+      currentLoginAt: u.currentLoginAt || null,
+      lastSeenAt: u.lastSeenAt || null,
+      lastLogoutAt: u.lastLogoutAt || null,
+    })),
+  });
+});
+
+// @route GET /api/users/managers/:id/activity (admin only)
+const getManagerActivity = asyncHandler(async (req, res) => {
+  const manager = await User.findOne({ _id: req.params.id, role: "manager" }).lean();
+
+  if (!manager) {
+    throw new ApiError(404, "Manager not found.");
+  }
+
+  const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+  const logs = await ActivityLog.find({ user: manager._id })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .lean();
+
+  res.json({
+    success: true,
+    manager: {
+      id: String(manager._id),
+      name: manager.name,
+      email: manager.email,
+      online: Boolean(
+        manager.currentSessionId &&
+          manager.lastSeenAt &&
+          Date.now() - new Date(manager.lastSeenAt).getTime() < 2 * 60 * 1000
+      ),
+      currentSessionId: manager.currentSessionId,
+      currentLoginAt: manager.currentLoginAt,
+      lastSeenAt: manager.lastSeenAt,
+      lastLogoutAt: manager.lastLogoutAt,
+    },
+    activity: logs.map((log) => ({
+      id: String(log._id),
+      type: log.type,
+      action: log.action,
+      method: log.method,
+      path: log.path,
+      sessionId: log.sessionId,
+      createdAt: log.createdAt,
+    })),
   });
 });
 
@@ -131,6 +187,7 @@ const deleteUser = asyncHandler(async (req, res) => {
 module.exports = {
   getAllUsers,
   getManagers,
+  getManagerActivity,
   setUserRole,
   createManager,
   deleteUser,

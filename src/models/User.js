@@ -39,6 +39,12 @@ const userSchema = new mongoose.Schema(
       default: "customer",
       index: true,
     },
+    // Manager session tracking. Historical login/logout/activity records
+    // live in ActivityLog; these fields expose the current session quickly.
+    currentSessionId: { type: String, default: null },
+    currentLoginAt: { type: Date, default: null },
+    lastSeenAt: { type: Date, default: null },
+    lastLogoutAt: { type: Date, default: null },
   },
   { ...baseOptions, _id: false }
 );
