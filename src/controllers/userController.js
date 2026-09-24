@@ -4,9 +4,9 @@ const User = require("../models/User");
 const Cart = require("../models/Cart");
 const Wishlist = require("../models/Wishlist");
 const Review = require("../models/Review");
+const ManagerActivity = require("../models/ManagerActivity");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
-const ActivityLog = require("../models/ActivityLog");
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -23,29 +23,73 @@ const getAllUsers = asyncHandler(async (req, res) => {
 
 // @route GET /api/users/managers  (admin only)
 const getManagers = asyncHandler(async (req, res) => {
-  const managers = await User.find({ role: "manager" }).sort({ createdAt: -1 }).lean();
+  const managers = await User.find({ role: "manager" }).sort({ createdAt: -1 });
+  const managerIds = managers.map((u) => String(u._id));
+
+  const recentActivity = managerIds.length
+    ? await ManagerActivity.find({ managerId: { $in: managerIds } })
+        .sort({ createdAt: -1 })
+        .lean()
+    : [];
+
+  const latestByManager = new Map();
+  for (const event of recentActivity) {
+    const id = String(event.managerId);
+    if (!latestByManager.has(id)) latestByManager.set(id, event);
+  }
+
+  const latestLogin = new Map();
+  const latestLogout = new Map();
+  for (const event of recentActivity) {
+    const id = String(event.managerId);
+    if (event.type === "login" && !latestLogin.has(id)) latestLogin.set(id, event);
+    if (event.type === "logout" && !latestLogout.has(id)) latestLogout.set(id, event);
+  }
+
+  const now = Date.now();
+  const ONLINE_WINDOW_MS = 5 * 60 * 1000;
+
+  const payload = managers.map((u) => {
+    const json = u.toJSON();
+    const id = String(u._id);
+    const latest = latestByManager.get(id);
+    const login = latestLogin.get(id);
+    const logout = latestLogout.get(id);
+    const lastActivityAt = latest?.createdAt || null;
+    const lastLoginAt = login?.createdAt || null;
+    const lastLogoutAt = logout?.createdAt || null;
+
+    // A manager is considered online when their most recent tracked request
+    // happened recently and a later logout has not been recorded.
+    const online = Boolean(
+      lastActivityAt &&
+        now - new Date(lastActivityAt).getTime() <= ONLINE_WINDOW_MS &&
+        (!lastLogoutAt || new Date(lastLogoutAt).getTime() < new Date(lastActivityAt).getTime())
+    );
+
+    return {
+      ...json,
+      monitoring: {
+        online,
+        lastActivityAt,
+        lastLoginAt,
+        lastLogoutAt,
+      },
+      online,
+      lastActivityAt,
+      lastLoginAt,
+      lastLogoutAt,
+    };
+  });
 
   res.json({
     success: true,
-    count: managers.length,
-    managers: managers.map((u) => ({
-      ...u,
-      id: String(u._id),
-      _id: undefined,
-      online: Boolean(
-        u.currentSessionId &&
-          u.lastSeenAt &&
-          Date.now() - new Date(u.lastSeenAt).getTime() < 2 * 60 * 1000
-      ),
-      currentSessionId: u.currentSessionId || null,
-      currentLoginAt: u.currentLoginAt || null,
-      lastSeenAt: u.lastSeenAt || null,
-      lastLogoutAt: u.lastLogoutAt || null,
-    })),
+    count: payload.length,
+    managers: payload,
   });
 });
 
-// @route GET /api/users/managers/:id/activity (admin only)
+// @route GET /api/users/managers/:id/activity?limit=150  (admin only)
 const getManagerActivity = asyncHandler(async (req, res) => {
   const manager = await User.findOne({ _id: req.params.id, role: "manager" }).lean();
 
@@ -53,11 +97,42 @@ const getManagerActivity = asyncHandler(async (req, res) => {
     throw new ApiError(404, "Manager not found.");
   }
 
-  const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
-  const logs = await ActivityLog.find({ user: manager._id })
+  const parsedLimit = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(parsedLimit)
+    ? Math.min(Math.max(parsedLimit, 1), 500)
+    : 150;
+
+  const activities = await ManagerActivity.find({ managerId: String(manager._id) })
     .sort({ createdAt: -1 })
     .limit(limit)
     .lean();
+
+  const login = activities.find((item) => item.type === "login");
+  const logout = activities.find((item) => item.type === "logout");
+  const latest = activities[0] || null;
+  const now = Date.now();
+  const lastActivityAt = latest?.createdAt || null;
+  const lastLoginAt = login?.createdAt || null;
+  const lastLogoutAt = logout?.createdAt || null;
+  const online = Boolean(
+    lastActivityAt &&
+      now - new Date(lastActivityAt).getTime() <= 5 * 60 * 1000 &&
+      (!lastLogoutAt || new Date(lastLogoutAt).getTime() < new Date(lastActivityAt).getTime())
+  );
+
+  const normalized = activities.map((item) => ({
+    id: String(item._id),
+    managerId: String(item.managerId),
+    type: item.type,
+    action: item.action,
+    method: item.method,
+    path: item.path,
+    statusCode: item.statusCode,
+    ip: item.ip,
+    userAgent: item.userAgent,
+    createdAt: item.createdAt,
+    timestamp: item.createdAt,
+  }));
 
   res.json({
     success: true,
@@ -65,25 +140,18 @@ const getManagerActivity = asyncHandler(async (req, res) => {
       id: String(manager._id),
       name: manager.name,
       email: manager.email,
-      online: Boolean(
-        manager.currentSessionId &&
-          manager.lastSeenAt &&
-          Date.now() - new Date(manager.lastSeenAt).getTime() < 2 * 60 * 1000
-      ),
-      currentSessionId: manager.currentSessionId,
-      currentLoginAt: manager.currentLoginAt,
-      lastSeenAt: manager.lastSeenAt,
-      lastLogoutAt: manager.lastLogoutAt,
+      role: manager.role,
     },
-    activity: logs.map((log) => ({
-      id: String(log._id),
-      type: log.type,
-      action: log.action,
-      method: log.method,
-      path: log.path,
-      sessionId: log.sessionId,
-      createdAt: log.createdAt,
-    })),
+    count: normalized.length,
+    activities: normalized,
+    // Keep both keys so either activity-page implementation can consume it.
+    activity: normalized,
+    monitoring: {
+      online,
+      lastActivityAt,
+      lastLoginAt,
+      lastLogoutAt,
+    },
   });
 });
 

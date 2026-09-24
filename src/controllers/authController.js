@@ -6,8 +6,7 @@ const Wishlist = require("../models/Wishlist");
 const { signToken } = require("../utils/jwt");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
-const ActivityLog = require("../models/ActivityLog");
-const crypto = require("crypto");
+const ManagerActivity = require("../models/ManagerActivity");
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -82,28 +81,19 @@ const login = asyncHandler(async (req, res) => {
     throw new ApiError(401, "Invalid email or password.");
   }
 
-  const sessionId = user.role === "manager" ? crypto.randomUUID() : null;
-  const token = signToken({ id: user._id, sessionId });
+  const token = signToken({ id: user._id });
 
-  // Each login creates a session record so admins can see historical
-  // login/logout times even after the manager has logged out.
-  const now = new Date();
-
+  // Keep a durable login event for manager monitoring.
   if (user.role === "manager") {
-    user.currentSessionId = sessionId;
-    user.currentLoginAt = now;
-    user.lastSeenAt = now;
-    user.lastLogoutAt = null;
-    await user.save();
-
-    await ActivityLog.create({
-      user: user._id,
-      sessionId,
+    ManagerActivity.create({
+      managerId: String(user._id),
       type: "login",
       action: "Manager logged in",
-      ip: req.ip,
-      userAgent: req.get("user-agent") || null,
-    });
+      method: req.method,
+      path: req.originalUrl,
+      ip: req.ip || "",
+      userAgent: req.get("user-agent") || "",
+    }).catch((error) => console.error("[manager-activity] login log failed", error));
   }
 
   res.json({
@@ -114,46 +104,22 @@ const login = asyncHandler(async (req, res) => {
 });
 
 // @route POST /api/auth/logout
+// The browser still owns the JWT, so logout is intentionally a small
+// server-side audit event. The frontend should clear its token after this.
 const logout = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.user.id);
-
-  if (user?.role === "manager") {
-    const sessionId = req.sessionId || user.currentSessionId || crypto.randomUUID();
-    const now = new Date();
-
-    await ActivityLog.create({
-      user: user._id,
-      sessionId,
+  if (req.user.role === "manager") {
+    await ManagerActivity.create({
+      managerId: req.user.id,
       type: "logout",
       action: "Manager logged out",
-      ip: req.ip,
-      userAgent: req.get("user-agent") || null,
+      method: req.method,
+      path: req.originalUrl,
+      ip: req.ip || "",
+      userAgent: req.get("user-agent") || "",
     });
-
-    user.lastLogoutAt = now;
-    if (user.currentSessionId === sessionId) {
-      user.lastSeenAt = now;
-      user.currentSessionId = null;
-      user.currentLoginAt = null;
-    }
-    await user.save();
   }
 
   res.json({ success: true, message: "Logged out successfully." });
-});
-
-// @route POST /api/auth/heartbeat
-const heartbeat = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.user.id);
-
-  if (user?.role === "manager" && req.sessionId) {
-    if (user.currentSessionId === req.sessionId) {
-      user.lastSeenAt = new Date();
-      await user.save();
-    }
-  }
-
-  res.json({ success: true });
 });
 
 // @route GET /api/auth/me
@@ -220,4 +186,4 @@ const changePassword = asyncHandler(async (req, res) => {
   res.json({ success: true, message: "Password updated successfully." });
 });
 
-module.exports = { register, login, logout, heartbeat, getMe, updateMe, changePassword };
+module.exports = { register, login, logout, getMe, updateMe, changePassword };

@@ -2,7 +2,7 @@ const { verifyToken } = require("../utils/jwt");
 const User = require("../models/User");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
-const ActivityLog = require("../models/ActivityLog");
+const ManagerActivity = require("../models/ManagerActivity");
 
 const protect = asyncHandler(async (req, res, next) => {
   const authHeader = req.headers.authorization || "";
@@ -32,28 +32,24 @@ const protect = asyncHandler(async (req, res, next) => {
     email: user.email,
     role: user.role || "customer",
   };
-  req.sessionId = decoded.sessionId || user.currentSessionId || null;
 
-  // Record manager activity centrally. This covers manager actions across
-  // products, orders, reviews, flash sales, etc., without changing every controller.
-  if (req.user.role === "manager" && req.sessionId) {
-    const now = new Date();
-    await Promise.all([
-      ActivityLog.create({
-        user: user._id,
-        sessionId: req.sessionId,
-        type: "activity",
+  // Track manager API activity without delaying the request. The response
+  // status is captured when Express finishes the response.
+  if (req.user.role === "manager" && req.originalUrl !== "/api/auth/logout") {
+    res.once("finish", () => {
+      ManagerActivity.create({
+        managerId: req.user.id,
+        type: "request",
+        action: `${req.method} ${req.path}`,
         method: req.method,
         path: req.originalUrl,
-        action: `${req.method} ${req.originalUrl}`,
-        ip: req.ip,
-        userAgent: req.get("user-agent") || null,
-      }),
-      User.updateOne(
-        { _id: user._id, currentSessionId: req.sessionId },
-        { $set: { lastSeenAt: now } }
-      ),
-    ]);
+        statusCode: res.statusCode,
+        ip: req.ip || "",
+        userAgent: req.get("user-agent") || "",
+      }).catch((error) => {
+        console.error("[manager-activity] request log failed", error);
+      });
+    });
   }
 
   next();
