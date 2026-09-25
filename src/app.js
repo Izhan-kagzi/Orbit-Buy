@@ -16,8 +16,10 @@ const aiRoutes = require("./routes/aiRoutes");
 const paymentRoutes = require("./routes/paymentRoutes");
 const userRoutes = require("./routes/userRoutes");
 const reviewRoutes = require("./routes/reviewRoutes");
+const settingsRoutes = require("./routes/settingsRoutes");
 
 const { errorHandler, notFound } = require("./middleware/errorHandler");
+const maintenanceGate = require("./middleware/maintenanceGate");
 
 const app = express();
 
@@ -117,9 +119,19 @@ app.get("/api/health", (req, res) => {
 });
 
 // ============================================================
+// MAINTENANCE MODE
+// ============================================================
+// Gate every /api/* request below except the always-allowed list inside
+// maintenanceGate itself (health, the maintenance status endpoint, and
+// login/me/logout so staff can still sign in and out).
+
+app.use(maintenanceGate);
+
+// ============================================================
 // API ROUTES
 // ============================================================
 
+app.use("/api/settings", settingsRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/flash-sale", flashSaleRoutes);
