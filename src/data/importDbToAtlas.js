@@ -39,7 +39,7 @@ if (!ATLAS_URI) {
     "\nCreate/update backend/.env with:"
   );
   console.error(
-    "\nATLAS_URI=mongodb+srv://USERNAME:PASSWORD@YOUR-CLUSTER.mongodb.net/orbit_buy?retryWrites=true&w=majority"
+    "\nATLAS_URI=mongodb+srv://izhankagzi313_db_user:OHXNEAzSXZz8HJnb@cluster0.et7s6hs.mongodb.net/orbit_buy?retryWrites=true&w=majority"
   );
   console.error("");
   process.exit(1);
