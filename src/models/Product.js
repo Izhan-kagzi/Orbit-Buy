@@ -3,13 +3,18 @@ const mongoose = require("mongoose");
 const { baseOptions } = require("./baseOptions");
 
 const VALID_SLUGS = [
+  // Men
   "mens-shirts",
   "mens-tshirts",
   "mens-jeans",
   "mens-trackpants",
   "mens-hoodies",
   "mens-jackets",
+  "mens-formals",
+  "mens-sweatshirts",
+  "mens-shackets",
 
+  // Women
   "women-dresses",
   "women-partywear",
   "women-jeans",
@@ -18,6 +23,9 @@ const VALID_SLUGS = [
   "women-skirts",
   "women-shirts",
   "women-jumpsuits",
+  "women-leggings",
+  "women-shrugs",
+  "women-cardigans",
 ];
 
 const productSchema = new mongoose.Schema(
@@ -28,6 +36,7 @@ const productSchema = new mongoose.Schema(
       type: String,
       default: () => `custom-${crypto.randomUUID().slice(0, 8)}`,
     },
+
     slug: {
       type: String,
       required: [true, "slug is required."],
@@ -37,8 +46,20 @@ const productSchema = new mongoose.Schema(
       },
       index: true,
     },
-    name: { type: String, required: [true, "name is required."], trim: true },
-    brand: { type: String, default: "OrbitBuy", trim: true, index: true },
+
+    name: {
+      type: String,
+      required: [true, "name is required."],
+      trim: true,
+    },
+
+    brand: {
+      type: String,
+      default: "OrbitBuy",
+      trim: true,
+      index: true,
+    },
+
     category: {
       type: String,
       required: [true, "category is required."],
@@ -48,30 +69,95 @@ const productSchema = new mongoose.Schema(
       },
       index: true,
     },
-    type: { type: String, default: null },
-    description: { type: String, default: "" },
-    sizes: { type: [String], default: ["S", "M", "L", "XL"] },
+
+    type: {
+      type: String,
+      default: null,
+    },
+
+    description: {
+      type: String,
+      default: "",
+    },
+
+    sizes: {
+      type: [String],
+      default: ["S", "M", "L", "XL"],
+    },
+
     price: {
       type: Number,
       required: [true, "price is required."],
       min: [0, "price cannot be negative."],
     },
-    oldPrice: { type: Number, default: null },
-    rating: { type: Number, default: 4.5, min: 0, max: 5 },
-    reviews: { type: Number, default: 0, min: 0 },
-    stock: { type: Number, default: 20, min: 0 },
-    isBestSeller: { type: Boolean, default: false, index: true },
-    isNewArrival: { type: Boolean, default: false, index: true },
-    image: { type: String, default: null },
-    images: { type: [String], default: [] },
-    videos: { type: [String], default: [] },
+
+    oldPrice: {
+      type: Number,
+      default: null,
+    },
+
+    rating: {
+      type: Number,
+      default: 4.5,
+      min: 0,
+      max: 5,
+    },
+
+    reviews: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    stock: {
+      type: Number,
+      default: 20,
+      min: 0,
+    },
+
+    isBestSeller: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    isNewArrival: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    image: {
+      type: String,
+      default: null,
+    },
+
+    images: {
+      type: [String],
+      default: [],
+    },
+
+    videos: {
+      type: [String],
+      default: [],
+    },
   },
-  { ...baseOptions, _id: false }
+  {
+    ...baseOptions,
+    _id: false,
+  }
 );
 
-// Text search across the fields the catalogue search box uses.
-productSchema.index({ name: "text", description: "text", brand: "text" });
-productSchema.index({ price: 1 });
+// Text search across catalogue fields.
+productSchema.index({
+  name: "text",
+  description: "text",
+  brand: "text",
+});
+
+productSchema.index({
+  price: 1,
+});
 
 module.exports = mongoose.model("Product", productSchema);
 module.exports.VALID_SLUGS = VALID_SLUGS;
