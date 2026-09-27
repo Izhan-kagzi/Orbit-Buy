@@ -7,18 +7,11 @@ const fs = require("fs");
 const path = require("path");
 const { MongoClient } = require("mongodb");
 
+require("dotenv").config();
+
 // ============================================================
 // CONFIG
 // ============================================================
-
-// IMPORTANT:
-// Do NOT put your Atlas password here if this file will be
-// committed to GitHub.
-//
-// Create a .env file with:
-// ATLAS_URI=mongodb+srv://USERNAME:PASSWORD@orbit-buy.lb7vjx8.mongodb.net/orbit_buy?retryWrites=true&w=majority&appName=orbit-buy
-
-require("dotenv").config();
 
 const ATLAS_URI = process.env.ATLAS_URI;
 
@@ -26,7 +19,6 @@ const DB_NAME = "orbit_buy";
 
 const JSON_FILE = path.join(__dirname, "db.json");
 
-// Collections that exist in db.json
 const COLLECTIONS = [
   "reviews",
   "users",
@@ -43,9 +35,11 @@ const COLLECTIONS = [
 
 if (!ATLAS_URI) {
   console.error("\n❌ ATLAS_URI is missing.");
-  console.error("\nCreate/update backend/.env with:\n");
   console.error(
-    "ATLAS_URI=mongodb+srv://izhankagzi313_db_user:OHXNEAzSXZz8HJnb@cluster0.et7s6hs.mongodb.net/"
+    "\nCreate/update backend/.env with:"
+  );
+  console.error(
+    "\nATLAS_URI=mongodb+srv://USERNAME:PASSWORD@YOUR-CLUSTER.mongodb.net/orbit_buy?retryWrites=true&w=majority"
   );
   console.error("");
   process.exit(1);
@@ -60,6 +54,102 @@ if (!fs.existsSync(JSON_FILE)) {
 // HELPERS
 // ============================================================
 
+/**
+ * Recursively converts MongoDB Extended JSON into the
+ * representation expected by the Orbit Buy Mongoose schemas.
+ *
+ * Important:
+ *
+ * { "$oid": "abc123..." }
+ *
+ * becomes:
+ *
+ * "abc123..."
+ *
+ * This is required because Orbit Buy uses String IDs.
+ */
+function convertMongoValues(value) {
+  // ----------------------------------------------------------
+  // Arrays
+  // ----------------------------------------------------------
+
+  if (Array.isArray(value)) {
+    return value.map(convertMongoValues);
+  }
+
+  // ----------------------------------------------------------
+  // Objects
+  // ----------------------------------------------------------
+
+  if (value && typeof value === "object") {
+    // --------------------------------------------------------
+    // MongoDB Extended JSON ObjectId
+    // --------------------------------------------------------
+
+    if (
+      Object.keys(value).length === 1 &&
+      typeof value.$oid === "string"
+    ) {
+      return value.$oid;
+    }
+
+    // --------------------------------------------------------
+    // MongoDB Extended JSON Date
+    // --------------------------------------------------------
+
+    if (
+      Object.keys(value).length === 1 &&
+      value.$date !== undefined
+    ) {
+      const dateValue = value.$date;
+
+      // "$date": "2026-01-01T00:00:00.000Z"
+      if (typeof dateValue === "string") {
+        const date = new Date(dateValue);
+
+        if (!Number.isNaN(date.getTime())) {
+          return date;
+        }
+      }
+
+      // "$date": 1234567890000
+      if (typeof dateValue === "number") {
+        const date = new Date(dateValue);
+
+        if (!Number.isNaN(date.getTime())) {
+          return date;
+        }
+      }
+
+      return dateValue;
+    }
+
+    // --------------------------------------------------------
+    // Normal object
+    // --------------------------------------------------------
+
+    const result = {};
+
+    for (const [key, val] of Object.entries(value)) {
+      result[key] = convertMongoValues(val);
+    }
+
+    return result;
+  }
+
+  // ----------------------------------------------------------
+  // Primitive
+  // ----------------------------------------------------------
+
+  return value;
+}
+
+/**
+ * Converts known date strings into JavaScript Date objects.
+ *
+ * This is kept in addition to $date handling because your
+ * db.json may contain ordinary ISO date strings.
+ */
 function convertDates(value) {
   if (Array.isArray(value)) {
     return value.map(convertDates);
@@ -69,10 +159,9 @@ function convertDates(value) {
     const result = {};
 
     for (const [key, val] of Object.entries(value)) {
-      // Convert known date fields into MongoDB Date objects
       if (
         typeof val === "string" &&
-        /^(createdAt|updatedAt|startDate|endDate|requestedAt|resolvedAt)$/.test(
+        /^(createdAt|updatedAt|startDate|endDate|requestedAt|resolvedAt|currentLoginAt|lastSeenAt|lastLogoutAt)$/.test(
           key
         ) &&
         !Number.isNaN(Date.parse(val))
@@ -87,6 +176,58 @@ function convertDates(value) {
   }
 
   return value;
+}
+
+/**
+ * Full document normalization.
+ */
+function normalizeDocument(document) {
+  const mongoConverted = convertMongoValues(document);
+
+  return convertDates(mongoConverted);
+}
+
+/**
+ * Ensures IDs that should be strings are actually strings.
+ *
+ * We intentionally do NOT generate new IDs here.
+ * Existing db.json IDs are preserved.
+ */
+function normalizeStringId(document) {
+  if (!document || typeof document !== "object") {
+    return document;
+  }
+
+  const result = {
+    ...document,
+  };
+
+  if (
+    result._id !== undefined &&
+    result._id !== null
+  ) {
+    result._id = String(result._id);
+  }
+
+  if (
+    result.id !== undefined &&
+    result.id !== null
+  ) {
+    result.id = String(result.id);
+  }
+
+  return result;
+}
+
+/**
+ * Normalize a normal collection.
+ */
+function normalizeCollectionDocuments(documents) {
+  return documents.map((document) => {
+    const normalized = normalizeDocument(document);
+
+    return normalizeStringId(normalized);
+  });
 }
 
 // ============================================================
@@ -105,9 +246,13 @@ async function importDatabase() {
     // Read db.json
     // --------------------------------------------------------
 
-    console.log("📂 Reading:", JSON_FILE);
+    console.log("📂 Reading:");
+    console.log(JSON_FILE);
 
-    const rawData = fs.readFileSync(JSON_FILE, "utf8");
+    const rawData = fs.readFileSync(
+      JSON_FILE,
+      "utf8"
+    );
 
     const data = JSON.parse(rawData);
 
@@ -123,11 +268,15 @@ async function importDatabase() {
 
     await client.connect();
 
-    console.log("✅ Connected to MongoDB Atlas.\n");
+    console.log(
+      "✅ Connected to MongoDB Atlas.\n"
+    );
 
     const db = client.db(DB_NAME);
 
-    console.log(`🗄️ Database: ${DB_NAME}\n`);
+    console.log(
+      `🗄️ Database: ${DB_NAME}\n`
+    );
 
     // --------------------------------------------------------
     // Import each collection
@@ -137,45 +286,40 @@ async function importDatabase() {
       const sourceData = data[collectionName];
 
       if (sourceData === undefined) {
-        console.log(`⚠️ ${collectionName}: not found in db.json`);
+        console.log(
+          `⚠️ ${collectionName}: not found in db.json`
+        );
+
         continue;
       }
 
-      // ------------------------------------------------------
-      // Special handling for carts/wishlists
-      //
-      // db.json stores these as:
-      //
-      // "carts": {
-      //   "user-id": [],
-      //   "another-user-id": []
-      // }
-      //
-      // MongoDB collection will store them as documents:
-      //
-      // {
-      //   userId: "user-id",
-      //   items: []
-      // }
-      // ------------------------------------------------------
+      // ======================================================
+      // CARTS / WISHLISTS
+      // ======================================================
 
       if (
         collectionName === "carts" ||
         collectionName === "wishlists"
       ) {
-        const documents = Object.entries(sourceData).map(
-          ([userId, items]) => ({
-            userId,
-            items: convertDates(items),
-          })
-        );
+        const documents = Object.entries(
+          sourceData
+        ).map(([userId, items]) => {
+          return {
+            userId: String(userId),
 
-        const collection = db.collection(collectionName);
+            items: normalizeDocument(items),
+          };
+        });
+
+        const collection =
+          db.collection(collectionName);
 
         await collection.deleteMany({});
 
         if (documents.length > 0) {
-          await collection.insertMany(documents);
+          await collection.insertMany(
+            documents
+          );
         }
 
         console.log(
@@ -185,9 +329,9 @@ async function importDatabase() {
         continue;
       }
 
-      // ------------------------------------------------------
-      // Normal array collections
-      // ------------------------------------------------------
+      // ======================================================
+      // NORMAL ARRAY COLLECTIONS
+      // ======================================================
 
       if (!Array.isArray(sourceData)) {
         console.log(
@@ -197,15 +341,32 @@ async function importDatabase() {
         continue;
       }
 
-      const documents = sourceData.map(convertDates);
+      // ------------------------------------------------------
+      // Normalize documents
+      // ------------------------------------------------------
 
-      const collection = db.collection(collectionName);
+      const documents =
+        normalizeCollectionDocuments(
+          sourceData
+        );
 
-      // Clear existing collection before import
+      const collection =
+        db.collection(collectionName);
+
+      // ------------------------------------------------------
+      // Clear existing collection
+      // ------------------------------------------------------
+
       await collection.deleteMany({});
 
+      // ------------------------------------------------------
+      // Insert documents
+      // ------------------------------------------------------
+
       if (documents.length > 0) {
-        await collection.insertMany(documents);
+        await collection.insertMany(
+          documents
+        );
       }
 
       console.log(
@@ -213,9 +374,9 @@ async function importDatabase() {
       );
     }
 
-    // --------------------------------------------------------
-    // Show final counts
-    // --------------------------------------------------------
+    // ========================================================
+    // FINAL COUNTS
+    // ========================================================
 
     console.log("\n==============================================");
     console.log(" Atlas Import Summary");
@@ -226,17 +387,114 @@ async function importDatabase() {
         .collection(collectionName)
         .countDocuments();
 
-      console.log(`📦 ${collectionName}: ${count}`);
+      console.log(
+        `📦 ${collectionName}: ${count}`
+      );
     }
+
+    // ========================================================
+    // VERIFY ID TYPES
+    // ========================================================
+
+    console.log("\n==============================================");
+    console.log(" ID Type Verification");
+    console.log("==============================================\n");
+
+    // --------------------------------------------------------
+    // Users
+    // --------------------------------------------------------
+
+    const sampleUser =
+      await db.collection("users").findOne({});
+
+    if (sampleUser) {
+      console.log(
+        "👤 User sample:"
+      );
+
+      console.log(
+        "   _id:",
+        sampleUser._id
+      );
+
+      console.log(
+        "   _id type:",
+        typeof sampleUser._id
+      );
+    } else {
+      console.log(
+        "⚠️ No users found."
+      );
+    }
+
+    // --------------------------------------------------------
+    // Products
+    // --------------------------------------------------------
+
+    const sampleProduct =
+      await db.collection("products").findOne({});
+
+    if (sampleProduct) {
+      console.log(
+        "\n🛍️ Product sample:"
+      );
+
+      console.log(
+        "   _id:",
+        sampleProduct._id
+      );
+
+      console.log(
+        "   _id type:",
+        typeof sampleProduct._id
+      );
+
+      console.log(
+        "   slug:",
+        sampleProduct.slug
+      );
+
+      console.log(
+        "   name:",
+        sampleProduct.name
+      );
+    } else {
+      console.log(
+        "\n⚠️ No products found."
+      );
+    }
+
+    // ========================================================
+    // SUCCESS
+    // ========================================================
 
     console.log("\n==============================================");
     console.log("✅ IMPORT COMPLETED SUCCESSFULLY");
     console.log("==============================================\n");
 
-    console.log(`Database: ${DB_NAME}`);
-    console.log("You can now open MongoDB Compass and check Atlas.\n");
+    console.log(
+      `Database: ${DB_NAME}`
+    );
+
+    console.log(
+      "\nExpected ID type:"
+    );
+
+    console.log(
+      "Users:    String"
+    );
+
+    console.log(
+      "Products: String"
+    );
+
+    console.log(
+      "\nYou can now check the Atlas collections in MongoDB Compass.\n"
+    );
   } catch (error) {
-    console.error("\n❌ IMPORT FAILED\n");
+    console.error(
+      "\n❌ IMPORT FAILED\n"
+    );
 
     console.error(error);
 
@@ -244,9 +502,16 @@ async function importDatabase() {
   } finally {
     if (client) {
       await client.close();
-      console.log("🔌 Atlas connection closed.");
+
+      console.log(
+        "🔌 Atlas connection closed."
+      );
     }
   }
 }
+
+// ============================================================
+// RUN
+// ============================================================
 
 importDatabase();
