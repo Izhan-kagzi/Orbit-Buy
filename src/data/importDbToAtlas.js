@@ -5,7 +5,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { MongoClient } = require("mongodb");
+const { MongoClient,  ObjectId } = require("mongodb");
 
 require("dotenv").config();
 
@@ -70,6 +70,14 @@ if (!fs.existsSync(JSON_FILE)) {
  */
 function convertMongoValues(value) {
   // ----------------------------------------------------------
+  // Actual BSON ObjectId
+  // ----------------------------------------------------------
+
+  if (value instanceof ObjectId) {
+    return value.toString();
+  }
+
+  // ----------------------------------------------------------
   // Arrays
   // ----------------------------------------------------------
 
@@ -82,10 +90,7 @@ function convertMongoValues(value) {
   // ----------------------------------------------------------
 
   if (value && typeof value === "object") {
-    // --------------------------------------------------------
     // MongoDB Extended JSON ObjectId
-    // --------------------------------------------------------
-
     if (
       Object.keys(value).length === 1 &&
       typeof value.$oid === "string"
@@ -93,17 +98,13 @@ function convertMongoValues(value) {
       return value.$oid;
     }
 
-    // --------------------------------------------------------
     // MongoDB Extended JSON Date
-    // --------------------------------------------------------
-
     if (
       Object.keys(value).length === 1 &&
       value.$date !== undefined
     ) {
       const dateValue = value.$date;
 
-      // "$date": "2026-01-01T00:00:00.000Z"
       if (typeof dateValue === "string") {
         const date = new Date(dateValue);
 
@@ -112,7 +113,6 @@ function convertMongoValues(value) {
         }
       }
 
-      // "$date": 1234567890000
       if (typeof dateValue === "number") {
         const date = new Date(dateValue);
 
@@ -124,10 +124,6 @@ function convertMongoValues(value) {
       return dateValue;
     }
 
-    // --------------------------------------------------------
-    // Normal object
-    // --------------------------------------------------------
-
     const result = {};
 
     for (const [key, val] of Object.entries(value)) {
@@ -136,10 +132,6 @@ function convertMongoValues(value) {
 
     return result;
   }
-
-  // ----------------------------------------------------------
-  // Primitive
-  // ----------------------------------------------------------
 
   return value;
 }
