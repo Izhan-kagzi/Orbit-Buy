@@ -1,11 +1,11 @@
 // ============================================================
 // Orbit Buy - Import db.json → MongoDB Atlas
-// File: backend/importDbToAtlas.js
+// File: backend/src/data/importDbToAtlas.js
 // ============================================================
 
 const fs = require("fs");
 const path = require("path");
-const { MongoClient,  ObjectId } = require("mongodb");
+const { MongoClient, ObjectId } = require("mongodb");
 
 require("dotenv").config();
 
@@ -39,7 +39,7 @@ if (!ATLAS_URI) {
     "\nCreate/update backend/.env with:"
   );
   console.error(
-    "\nATLAS_URI=mongodb+srv://izhankagzi313_db_user:OHXNEAzSXZz8HJnb@cluster0.et7s6hs.mongodb.net/"
+    "\nATLAS_URI=mongodb+srv://YOUR_USERNAME:YOUR_PASSWORD@YOUR_CLUSTER.mongodb.net/"
   );
   console.error("");
   process.exit(1);
@@ -55,18 +55,24 @@ if (!fs.existsSync(JSON_FILE)) {
 // ============================================================
 
 /**
- * Recursively converts MongoDB Extended JSON into the
- * representation expected by the Orbit Buy Mongoose schemas.
+ * Recursively converts MongoDB values into the format
+ * expected by the Orbit Buy Mongoose schemas.
  *
- * Important:
+ * Orbit Buy uses String IDs.
  *
- * { "$oid": "abc123..." }
+ * Examples:
  *
- * becomes:
- *
+ * ObjectId("abc123...")
+ *       ↓
  * "abc123..."
  *
- * This is required because Orbit Buy uses String IDs.
+ * { "$oid": "abc123..." }
+ *       ↓
+ * "abc123..."
+ *
+ * { "$date": "2026-01-01T00:00:00.000Z" }
+ *       ↓
+ * Date(...)
  */
 function convertMongoValues(value) {
   // ----------------------------------------------------------
@@ -90,7 +96,10 @@ function convertMongoValues(value) {
   // ----------------------------------------------------------
 
   if (value && typeof value === "object") {
+    // --------------------------------------------------------
     // MongoDB Extended JSON ObjectId
+    // --------------------------------------------------------
+
     if (
       Object.keys(value).length === 1 &&
       typeof value.$oid === "string"
@@ -98,7 +107,10 @@ function convertMongoValues(value) {
       return value.$oid;
     }
 
+    // --------------------------------------------------------
     // MongoDB Extended JSON Date
+    // --------------------------------------------------------
+
     if (
       Object.keys(value).length === 1 &&
       value.$date !== undefined
@@ -124,6 +136,10 @@ function convertMongoValues(value) {
       return dateValue;
     }
 
+    // --------------------------------------------------------
+    // Normal object
+    // --------------------------------------------------------
+
     const result = {};
 
     for (const [key, val] of Object.entries(value)) {
@@ -133,14 +149,18 @@ function convertMongoValues(value) {
     return result;
   }
 
+  // ----------------------------------------------------------
+  // Primitive
+  // ----------------------------------------------------------
+
   return value;
 }
 
 /**
- * Converts known date strings into JavaScript Date objects.
+ * Converts known ISO date strings into JavaScript Date objects.
  *
- * This is kept in addition to $date handling because your
- * db.json may contain ordinary ISO date strings.
+ * This supports normal JSON date strings in db.json in addition
+ * to MongoDB Extended JSON $date values.
  */
 function convertDates(value) {
   if (Array.isArray(value)) {
@@ -171,7 +191,7 @@ function convertDates(value) {
 }
 
 /**
- * Full document normalization.
+ * Full recursive document normalization.
  */
 function normalizeDocument(document) {
   const mongoConverted = convertMongoValues(document);
@@ -180,10 +200,28 @@ function normalizeDocument(document) {
 }
 
 /**
- * Ensures IDs that should be strings are actually strings.
+ * IMPORTANT:
  *
- * We intentionally do NOT generate new IDs here.
- * Existing db.json IDs are preserved.
+ * db.json uses:
+ *
+ *   id
+ *
+ * while the Mongoose schemas use:
+ *
+ *   _id
+ *
+ * Therefore we must explicitly convert:
+ *
+ *   id → _id
+ *
+ * If we leave `id` unchanged and don't create `_id`,
+ * MongoDB's native driver automatically generates an ObjectId.
+ *
+ * That was the cause of the previous:
+ *
+ *   _id type: object
+ *
+ * problem.
  */
 function normalizeStringId(document) {
   if (!document || typeof document !== "object") {
@@ -194,6 +232,10 @@ function normalizeStringId(document) {
     ...document,
   };
 
+  // ----------------------------------------------------------
+  // Existing _id
+  // ----------------------------------------------------------
+
   if (
     result._id !== undefined &&
     result._id !== null
@@ -201,18 +243,40 @@ function normalizeStringId(document) {
     result._id = String(result._id);
   }
 
+  // ----------------------------------------------------------
+  // db.json uses `id`
+  // ----------------------------------------------------------
+
   if (
-    result.id !== undefined &&
-    result.id !== null
+    result._id === undefined ||
+    result._id === null
   ) {
-    result.id = String(result.id);
+    if (
+      result.id !== undefined &&
+      result.id !== null
+    ) {
+      result._id = String(result.id);
+    }
   }
+
+  // ----------------------------------------------------------
+  // Remove legacy top-level `id`
+  //
+  // We don't want both:
+  //
+  // id
+  // _id
+  //
+  // The application uses Mongoose _id.
+  // ----------------------------------------------------------
+
+  delete result.id;
 
   return result;
 }
 
 /**
- * Normalize a normal collection.
+ * Normalize a normal array-based collection.
  */
 function normalizeCollectionDocuments(documents) {
   return documents.map((document) => {
@@ -220,6 +284,60 @@ function normalizeCollectionDocuments(documents) {
 
     return normalizeStringId(normalized);
   });
+}
+
+// ============================================================
+// CART / WISHLIST NORMALIZATION
+// ============================================================
+
+/**
+ * db.json stores carts/wishlists as:
+ *
+ * {
+ *   "admin-seed-user-0001": [],
+ *   "some-user-id": []
+ * }
+ *
+ * Cart schema expects:
+ *
+ * {
+ *   user: String,
+ *   items: []
+ * }
+ *
+ * Wishlist schema expects:
+ *
+ * {
+ *   user: String,
+ *   products: []
+ * }
+ */
+function normalizeUserCollection(
+  collectionName,
+  sourceData
+) {
+  return Object.entries(sourceData).map(
+    ([userId, value]) => {
+      const normalizedValue =
+        normalizeDocument(value);
+
+      if (collectionName === "carts") {
+        return {
+          user: String(userId),
+          items: Array.isArray(normalizedValue)
+            ? normalizedValue
+            : [],
+        };
+      }
+
+      return {
+        user: String(userId),
+        products: Array.isArray(normalizedValue)
+          ? normalizedValue
+          : [],
+      };
+    }
+  );
 }
 
 // ============================================================
@@ -293,19 +411,28 @@ async function importDatabase() {
         collectionName === "carts" ||
         collectionName === "wishlists"
       ) {
-        const documents = Object.entries(
-          sourceData
-        ).map(([userId, items]) => {
-          return {
-            userId: String(userId),
+        if (
+          !sourceData ||
+          typeof sourceData !== "object" ||
+          Array.isArray(sourceData)
+        ) {
+          console.log(
+            `⚠️ ${collectionName}: expected an object keyed by user ID`
+          );
 
-            items: normalizeDocument(items),
-          };
-        });
+          continue;
+        }
+
+        const documents =
+          normalizeUserCollection(
+            collectionName,
+            sourceData
+          );
 
         const collection =
           db.collection(collectionName);
 
+        // Delete previous imported data.
         await collection.deleteMany({});
 
         if (documents.length > 0) {
@@ -341,6 +468,32 @@ async function importDatabase() {
         normalizeCollectionDocuments(
           sourceData
         );
+
+      // ------------------------------------------------------
+      // Debug first document before insertion
+      // ------------------------------------------------------
+
+      if (
+        (collectionName === "users" ||
+          collectionName === "products" ||
+          collectionName === "orders" ||
+          collectionName === "coupons") &&
+        documents.length > 0
+      ) {
+        console.log(
+          `\n🔎 ${collectionName} first document ID check:`
+        );
+
+        console.log(
+          "   _id:",
+          documents[0]._id
+        );
+
+        console.log(
+          "   _id type:",
+          typeof documents[0]._id
+        );
+      }
 
       const collection =
         db.collection(collectionName);
@@ -400,9 +553,7 @@ async function importDatabase() {
       await db.collection("users").findOne({});
 
     if (sampleUser) {
-      console.log(
-        "👤 User sample:"
-      );
+      console.log("👤 User sample:");
 
       console.log(
         "   _id:",
@@ -412,6 +563,16 @@ async function importDatabase() {
       console.log(
         "   _id type:",
         typeof sampleUser._id
+      );
+
+      console.log(
+        "   email:",
+        sampleUser.email
+      );
+
+      console.log(
+        "   role:",
+        sampleUser.role
       );
     } else {
       console.log(
@@ -427,9 +588,7 @@ async function importDatabase() {
       await db.collection("products").findOne({});
 
     if (sampleProduct) {
-      console.log(
-        "\n🛍️ Product sample:"
-      );
+      console.log("\n🛍️ Product sample:");
 
       console.log(
         "   _id:",
@@ -456,6 +615,157 @@ async function importDatabase() {
       );
     }
 
+    // --------------------------------------------------------
+    // Cart verification
+    // --------------------------------------------------------
+
+    const sampleCart =
+      await db.collection("carts").findOne({});
+
+    if (sampleCart) {
+      console.log("\n🛒 Cart sample:");
+
+      console.log(
+        "   user:",
+        sampleCart.user
+      );
+
+      console.log(
+        "   user type:",
+        typeof sampleCart.user
+      );
+
+      console.log(
+        "   items:",
+        Array.isArray(sampleCart.items)
+          ? sampleCart.items.length
+          : "invalid"
+      );
+
+      console.log(
+        "   has userId field:",
+        Object.prototype.hasOwnProperty.call(
+          sampleCart,
+          "userId"
+        )
+      );
+    } else {
+      console.log(
+        "\n⚠️ No carts found."
+      );
+    }
+
+    // --------------------------------------------------------
+    // Wishlist verification
+    // --------------------------------------------------------
+
+    const sampleWishlist =
+      await db.collection("wishlists").findOne({});
+
+    if (sampleWishlist) {
+      console.log("\n❤️ Wishlist sample:");
+
+      console.log(
+        "   user:",
+        sampleWishlist.user
+      );
+
+      console.log(
+        "   user type:",
+        typeof sampleWishlist.user
+      );
+
+      console.log(
+        "   products:",
+        Array.isArray(sampleWishlist.products)
+          ? sampleWishlist.products.length
+          : "invalid"
+      );
+
+      console.log(
+        "   has userId field:",
+        Object.prototype.hasOwnProperty.call(
+          sampleWishlist,
+          "userId"
+        )
+      );
+    } else {
+      console.log(
+        "\n⚠️ No wishlists found."
+      );
+    }
+
+    // ========================================================
+    // FINAL VALIDATION
+    // ========================================================
+
+    const userIdIsString =
+      !sampleUser ||
+      typeof sampleUser._id === "string";
+
+    const productIdIsString =
+      !sampleProduct ||
+      typeof sampleProduct._id === "string";
+
+    const cartStructureIsCorrect =
+      !sampleCart ||
+      (
+        typeof sampleCart.user === "string" &&
+        !Object.prototype.hasOwnProperty.call(
+          sampleCart,
+          "userId"
+        )
+      );
+
+    const wishlistStructureIsCorrect =
+      !sampleWishlist ||
+      (
+        typeof sampleWishlist.user === "string" &&
+        !Object.prototype.hasOwnProperty.call(
+          sampleWishlist,
+          "userId"
+        )
+      );
+
+    if (
+      !userIdIsString ||
+      !productIdIsString ||
+      !cartStructureIsCorrect ||
+      !wishlistStructureIsCorrect
+    ) {
+      console.error(
+        "\n❌ IMPORT VALIDATION FAILED."
+      );
+
+      console.error(
+        "\nExpected:"
+      );
+
+      console.error(
+        "   users._id      → String"
+      );
+
+      console.error(
+        "   products._id   → String"
+      );
+
+      console.error(
+        "   carts.user     → String"
+      );
+
+      console.error(
+        "   wishlists.user → String"
+      );
+
+      console.error(
+        "\nDo NOT deploy/test Render yet."
+      );
+
+      process.exitCode = 1;
+
+      return;
+    }
+
     // ========================================================
     // SUCCESS
     // ========================================================
@@ -469,15 +779,23 @@ async function importDatabase() {
     );
 
     console.log(
-      "\nExpected ID type:"
+      "\nVerified:"
     );
 
     console.log(
-      "Users:    String"
+      "✅ Users _id: String"
     );
 
     console.log(
-      "Products: String"
+      "✅ Products _id: String"
+    );
+
+    console.log(
+      "✅ Carts use: user"
+    );
+
+    console.log(
+      "✅ Wishlists use: user"
     );
 
     console.log(
