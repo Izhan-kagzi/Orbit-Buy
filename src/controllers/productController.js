@@ -7,444 +7,991 @@ const asyncHandler = require("../utils/asyncHandler");
 
 const { VALID_SLUGS } = Product;
 
-/*
-=====================================================
-HELPERS
-=====================================================
-*/
+/* =========================================================
+   HELPERS
+========================================================= */
 
-/* Safely convert FormData boolean values. */
-function parseBool(value, fallback = false) {
-  if (value === undefined || value === null || value === "") return fallback;
-  if (typeof value === "boolean") return value;
-  return ["true", "1", "yes", "on"].includes(String(value).toLowerCase());
-}
+const parseBool = (value) => {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
 
-/* Get files safely from a multer upload.fields() request. */
-function getFiles(req, fieldName) {
-  if (!req.files || !req.files[fieldName]) return [];
-  return Array.isArray(req.files[fieldName]) ? req.files[fieldName] : [];
-}
+  if (typeof value === "boolean") {
+    return value;
+  }
 
-function getUploadedImages(req) {
-  return getFiles(req, "images").map(
-    (file) => `/uploads/custom/${file.filename}`
+  return ["true", "1", "yes", "on"].includes(
+    String(value).toLowerCase()
   );
-}
+};
 
-function getUploadedVideos(req) {
-  return getFiles(req, "videos").map(
-    (file) => `/uploads/custom/${file.filename}`
-  );
-}
+const getFiles = (req, fieldName) => {
+  if (!req.files) return [];
 
-/* Backward compatibility for legacy upload.single("image") */
-function getLegacyImage(req) {
-  const files = getFiles(req, "image");
-  if (!files.length) return null;
-  return `/uploads/custom/${files[0].filename}`;
-}
+  if (Array.isArray(req.files)) {
+    return req.files.filter(
+      (file) => file && (!fieldName || file.fieldname === fieldName)
+    );
+  }
 
-/* Safely parse an array sent through FormData (JSON string, CSV or array). */
-function parseArrayField(value) {
-  if (value === undefined || value === null || value === "") return null;
+  if (Array.isArray(req.files[fieldName])) {
+    return req.files[fieldName];
+  }
 
-  if (Array.isArray(value)) return value.filter(Boolean);
+  return [];
+};
+
+const getUploadedImages = (req) => {
+  const fields = [
+    "images",
+    "image",
+    "productImages",
+    "productImage",
+  ];
+
+  return fields.flatMap((field) => getFiles(req, field));
+};
+
+const getUploadedVideos = (req) => {
+  const fields = [
+    "videos",
+    "video",
+    "productVideos",
+    "productVideo",
+  ];
+
+  return fields.flatMap((field) => getFiles(req, field));
+};
+
+const getLegacyImage = (req) => {
+  if (req.file) return req.file;
+
+  const images = getUploadedImages(req);
+
+  return images.length ? images[0] : null;
+};
+
+const parseArrayField = (value) => {
+  if (value === undefined || value === null || value === "") {
+    return [];
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item).trim())
+      .filter(Boolean);
+  }
 
   if (typeof value === "string") {
     try {
       const parsed = JSON.parse(value);
-      if (Array.isArray(parsed)) return parsed.filter(Boolean);
-      return [String(parsed)].filter(Boolean);
-    } catch (error) {
-      return value
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean);
+
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((item) => String(item).trim())
+          .filter(Boolean);
+      }
+    } catch (_) {
+      // Not JSON; continue with comma-separated parsing.
     }
+
+    return value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
   }
 
-  throw new ApiError(400, "Invalid media array format.");
-}
+  return [String(value).trim()].filter(Boolean);
+};
 
-function uniqueArray(values) {
-  return [...new Set(Array.isArray(values) ? values.filter(Boolean) : [])];
-}
+const uniqueArray = (items = []) => {
+  return [...new Set(items.filter(Boolean).map(String))];
+};
 
-function getProductImages(product) {
-  const images = Array.isArray(product.images) ? [...product.images] : [];
+const getProductImages = (product) => {
+  if (!product) return [];
 
-  if (product.image && !images.includes(product.image)) {
-    images.unshift(product.image);
+  const images = [];
+
+  if (Array.isArray(product.images)) {
+    images.push(...product.images);
+  }
+
+  if (product.image) {
+    images.push(product.image);
   }
 
   return uniqueArray(images);
-}
+};
 
-function getProductVideos(product) {
-  return Array.isArray(product.videos) ? uniqueArray(product.videos) : [];
-}
+const getProductVideos = (product) => {
+  if (!product) return [];
 
-function parseSizes(sizes, fallback) {
-  if (sizes === undefined || sizes === "") return fallback;
+  const videos = [];
 
-  if (Array.isArray(sizes)) return sizes.filter(Boolean);
+  if (Array.isArray(product.videos)) {
+    videos.push(...product.videos);
+  }
 
-  return String(sizes)
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
+  if (product.video) {
+    videos.push(product.video);
+  }
 
-/*
-=====================================================
-GET PRODUCTS
-GET /api/products
-=====================================================
-*/
+  return uniqueArray(videos);
+};
+
+const parseSizes = (value) => {
+  if (value === undefined || value === null || value === "") {
+    return [];
+  }
+
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+
+      if (Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch (_) {
+      // Continue with comma-separated parsing.
+    }
+
+    return value
+      .split(",")
+      .map((size) => size.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+};
+
+/* =========================================================
+   PRODUCT LOOKUP
+========================================================= */
+
+/**
+ * Find a product using either:
+ *   1. Mongo/Mongoose _id
+ *   2. product id
+ *   3. product slug
+ *
+ * This prevents "Product Not Found" when the frontend URL
+ * contains a slug instead of the MongoDB _id.
+ */
+const findProductByIdentifier = async (identifier) => {
+  if (!identifier) {
+    return null;
+  }
+
+  const value = String(identifier).trim();
+
+  if (!value) {
+    return null;
+  }
+
+  /* -------------------------------------------------------
+     1. Try Mongo/Mongoose _id
+  ------------------------------------------------------- */
+
+  try {
+    const productById = await Product.findById(value);
+
+    if (productById) {
+      return productById;
+    }
+  } catch (_) {
+    // Invalid Mongo ObjectId/string format.
+    // Continue with slug/id lookup.
+  }
+
+  /* -------------------------------------------------------
+     2. Try slug
+  ------------------------------------------------------- */
+
+  try {
+    const productBySlug = await Product.findOne({
+      slug: value,
+    });
+
+    if (productBySlug) {
+      return productBySlug;
+    }
+  } catch (_) {
+    // Continue to the next lookup.
+  }
+
+  /* -------------------------------------------------------
+     3. Try id field if the Product schema/data contains
+        a separate "id" property.
+  ------------------------------------------------------- */
+
+  try {
+    const productByCustomId = await Product.findOne({
+      id: value,
+    });
+
+    if (productByCustomId) {
+      return productByCustomId;
+    }
+  } catch (_) {
+    // Ignore and return null below.
+  }
+
+  return null;
+};
+
+/* =========================================================
+   GET PRODUCTS
+========================================================= */
 
 const getProducts = asyncHandler(async (req, res) => {
   const {
+    page = 1,
+    limit = 20,
     category,
-    q,
-    sort,
-    minPrice,
-    maxPrice,
-    slug,
     brand,
     bestSeller,
     newArrival,
     onSale,
+    q,
+    minPrice,
+    maxPrice,
+    slug,
+    type,
+    sort,
   } = req.query;
 
   const filter = {};
 
-  if (slug) filter.slug = slug;
+  /* -------------------------------------------------------
+     Category
+  ------------------------------------------------------- */
 
-  if (category && category !== "All") {
-    filter.category = new RegExp(`^${escapeRegex(category)}$`, "i");
+  if (category) {
+    filter.category = category;
   }
+
+  /* -------------------------------------------------------
+     Brand
+  ------------------------------------------------------- */
 
   if (brand) {
-    filter.brand = new RegExp(`^${escapeRegex(brand)}$`, "i");
+    filter.brand = brand;
   }
 
-  if (bestSeller === "true") filter.isBestSeller = true;
-  if (newArrival === "true") filter.isNewArrival = true;
+  /* -------------------------------------------------------
+     Type
+  ------------------------------------------------------- */
 
-  if (onSale === "true") {
-    filter.$expr = { $gt: ["$oldPrice", "$price"] };
+  if (type) {
+    filter.type = type;
   }
+
+  /* -------------------------------------------------------
+     Slug
+  ------------------------------------------------------- */
+
+  if (slug) {
+    filter.slug = slug;
+  }
+
+  /* -------------------------------------------------------
+     Boolean filters
+  ------------------------------------------------------- */
+
+  const bestSellerValue = parseBool(bestSeller);
+
+  if (bestSellerValue !== undefined) {
+    filter.bestSeller = bestSellerValue;
+  }
+
+  const newArrivalValue = parseBool(newArrival);
+
+  if (newArrivalValue !== undefined) {
+    filter.newArrival = newArrivalValue;
+  }
+
+  const onSaleValue = parseBool(onSale);
+
+  if (onSaleValue !== undefined) {
+    filter.onSale = onSaleValue;
+  }
+
+  /* -------------------------------------------------------
+     Search
+  ------------------------------------------------------- */
 
   if (q) {
-    const keyword = new RegExp(escapeRegex(q), "i");
+    const searchRegex = new RegExp(String(q).trim(), "i");
+
     filter.$or = [
-      { name: keyword },
-      { category: keyword },
-      { brand: keyword },
-      { type: keyword },
-      { description: keyword },
+      { name: searchRegex },
+      { title: searchRegex },
+      { description: searchRegex },
+      { brand: searchRegex },
+      { category: searchRegex },
+      { slug: searchRegex },
     ];
   }
 
-  if (minPrice || maxPrice) {
+  /* -------------------------------------------------------
+     Price range
+  ------------------------------------------------------- */
+
+  if (minPrice !== undefined || maxPrice !== undefined) {
     filter.price = {};
-    if (minPrice) filter.price.$gte = Number(minPrice);
-    if (maxPrice) filter.price.$lte = Number(maxPrice);
+
+    if (minPrice !== undefined && minPrice !== "") {
+      filter.price.$gte = Number(minPrice);
+    }
+
+    if (maxPrice !== undefined && maxPrice !== "") {
+      filter.price.$lte = Number(maxPrice);
+    }
   }
 
-  const sortMap = {
-    price_asc: { price: 1 },
-    price_desc: { price: -1 },
-    rating: { rating: -1 },
-    newest: { createdAt: -1 },
+  /* -------------------------------------------------------
+     Pagination
+  ------------------------------------------------------- */
+
+  const currentPage = Math.max(Number(page) || 1, 1);
+  const perPage = Math.min(
+    Math.max(Number(limit) || 20, 1),
+    100
+  );
+
+  const skip = (currentPage - 1) * perPage;
+
+  /* -------------------------------------------------------
+     Sorting
+  ------------------------------------------------------- */
+
+  let sortOption = {
+    createdAt: -1,
   };
 
-  const sortBy = sortMap[sort] || { createdAt: -1 };
+  if (sort) {
+    switch (String(sort).toLowerCase()) {
+      case "price_asc":
+      case "price-low":
+      case "low-high":
+        sortOption = { price: 1 };
+        break;
 
-  const total = await Product.countDocuments(filter);
+      case "price_desc":
+      case "price-high":
+      case "high-low":
+        sortOption = { price: -1 };
+        break;
 
-  const page = Math.max(Number(req.query.page) || 1, 1);
-  const limit = Math.min(Number(req.query.limit) || total || 1, 200);
-  const skip = (page - 1) * limit;
+      case "name_asc":
+      case "name-a-z":
+        sortOption = { name: 1 };
+        break;
 
-  const products = await Product.find(filter)
-    .sort(sortBy)
-    .skip(skip)
-    .limit(limit);
+      case "name_desc":
+      case "name-z-a":
+        sortOption = { name: -1 };
+        break;
+
+      case "newest":
+        sortOption = { createdAt: -1 };
+        break;
+
+      case "oldest":
+        sortOption = { createdAt: 1 };
+        break;
+
+      default:
+        sortOption = {
+          createdAt: -1,
+        };
+    }
+  }
+
+  /* -------------------------------------------------------
+     Query
+  ------------------------------------------------------- */
+
+  const [products, total] = await Promise.all([
+    Product.find(filter)
+      .sort(sortOption)
+      .skip(skip)
+      .limit(perPage),
+
+    Product.countDocuments(filter),
+  ]);
 
   res.json({
     success: true,
-    count: total,
-    page,
-    pages: Math.ceil(total / limit) || 1,
-    products: products.map((p) => p.toJSON()),
+    count: products.length,
+    total,
+    page: currentPage,
+    pages: Math.max(Math.ceil(total / perPage), 1),
+    products: products.map((product) => product.toJSON()),
   });
 });
 
-function escapeRegex(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/*
-=====================================================
-GET BRANDS
-=====================================================
-*/
+/* =========================================================
+   GET BRANDS
+========================================================= */
 
 const getBrands = asyncHandler(async (req, res) => {
-  const brands = (await Product.distinct("brand")).filter(Boolean).sort();
+  const brands = await Product.distinct("brand");
 
-  res.json({ success: true, brands });
+  res.json({
+    success: true,
+    brands: brands
+      .filter(Boolean)
+      .map(String)
+      .sort((a, b) => a.localeCompare(b)),
+  });
 });
 
-/*
-=====================================================
-GET PRODUCT BY ID
-=====================================================
-*/
+/* =========================================================
+   GET PRODUCT BY ID OR SLUG
+========================================================= */
 
 const getProductById = asyncHandler(async (req, res) => {
-  const product = await Product.findById(req.params.id);
+  const identifier = decodeURIComponent(
+    String(req.params.id || "").trim()
+  );
+
+  if (!identifier) {
+    throw new ApiError(400, "Product identifier is required.");
+  }
+
+  const product = await findProductByIdentifier(identifier);
 
   if (!product) {
     throw new ApiError(404, "Product not found.");
   }
 
-  res.json({ success: true, product: product.toJSON() });
+  res.json({
+    success: true,
+    product: product.toJSON(),
+  });
 });
 
-/*
-=====================================================
-GET RELATED PRODUCTS
-=====================================================
-*/
+/* =========================================================
+   GET RELATED PRODUCTS
+========================================================= */
 
 const getRelatedProducts = asyncHandler(async (req, res) => {
-  const product = await Product.findById(req.params.id).lean();
+  const identifier = decodeURIComponent(
+    String(req.params.id || "").trim()
+  );
+
+  if (!identifier) {
+    throw new ApiError(400, "Product identifier is required.");
+  }
+
+  const product = await findProductByIdentifier(identifier);
 
   if (!product) {
     throw new ApiError(404, "Product not found.");
+  }
+
+  const productData = product.toObject
+    ? product.toObject()
+    : product;
+
+  const relatedConditions = [];
+
+  /* -------------------------------------------------------
+     Same category
+  ------------------------------------------------------- */
+
+  if (productData.category) {
+    relatedConditions.push({
+      category: productData.category,
+    });
+  }
+
+  /* -------------------------------------------------------
+     Same type
+  ------------------------------------------------------- */
+
+  if (productData.type) {
+    relatedConditions.push({
+      type: productData.type,
+    });
+  }
+
+  /* -------------------------------------------------------
+     Same brand
+  ------------------------------------------------------- */
+
+  if (productData.brand) {
+    relatedConditions.push({
+      brand: productData.brand,
+    });
+  }
+
+  /* -------------------------------------------------------
+     Same slug is generally not useful for related products,
+     but preserve the existing behavior if available.
+  ------------------------------------------------------- */
+
+  if (productData.slug) {
+    relatedConditions.push({
+      slug: productData.slug,
+    });
+  }
+
+  if (!relatedConditions.length) {
+    return res.json({
+      success: true,
+      count: 0,
+      products: [],
+    });
+  }
+
+  const excludeConditions = [];
+
+  if (productData._id !== undefined) {
+    excludeConditions.push({
+      _id: {
+        $ne: productData._id,
+      },
+    });
   }
 
   const related = await Product.find({
-    _id: { $ne: product._id },
-    $or: [
-      { slug: product.slug },
-      { category: product.category },
-      ...(product.type ? [{ type: product.type }] : []),
-    ],
-  }).limit(8);
+    ...(excludeConditions.length
+      ? excludeConditions[0]
+      : {}),
+    $or: relatedConditions,
+  })
+    .limit(8)
+    .sort({
+      createdAt: -1,
+    });
 
-  res.json({ success: true, products: related.map((p) => p.toJSON()) });
+  res.json({
+    success: true,
+    count: related.length,
+    products: related.map((item) => item.toJSON()),
+  });
 });
 
-/*
-=====================================================
-CREATE PRODUCT
-POST /api/products   (admin / manager)
-=====================================================
-*/
+/* =========================================================
+   CREATE PRODUCT
+========================================================= */
 
 const createProduct = asyncHandler(async (req, res) => {
-  const {
-    name,
-    brand,
-    category,
-    slug,
-    type,
-    description,
-    price,
-    oldPrice,
-    stock,
-    sizes,
-    isBestSeller,
-    isNewArrival,
-  } = req.body;
+  const body = {
+    ...req.body,
+  };
 
-  if (!name || !category || !slug || price === undefined || price === "") {
-    throw new ApiError(400, "name, category, slug and price are required.");
+  /* -------------------------------------------------------
+     Arrays
+  ------------------------------------------------------- */
+
+  if (req.body.images !== undefined) {
+    body.images = parseArrayField(req.body.images);
   }
 
-  if (!VALID_SLUGS.includes(slug)) {
-    throw new ApiError(400, `slug must be one of: ${VALID_SLUGS.join(", ")}`);
+  if (req.body.videos !== undefined) {
+    body.videos = parseArrayField(req.body.videos);
   }
 
-  if (!["Men", "Women"].includes(category)) {
-    throw new ApiError(400, 'category must be "Men" or "Women".');
+  if (req.body.tags !== undefined) {
+    body.tags = parseArrayField(req.body.tags);
   }
 
-  // Uploaded media processing
-  let images = getUploadedImages(req);
-  const legacyImage = getLegacyImage(req);
-
-  if (legacyImage && !images.includes(legacyImage)) {
-    images.unshift(legacyImage);
+  if (req.body.colors !== undefined) {
+    body.colors = parseArrayField(req.body.colors);
   }
 
-  const bodyImages = parseArrayField(req.body.images);
-  if (bodyImages) images = [...bodyImages, ...images];
-
-  if (req.body.image && !images.includes(req.body.image)) {
-    images.unshift(req.body.image);
+  if (req.body.sizes !== undefined) {
+    body.sizes = parseSizes(req.body.sizes);
   }
 
-  images = uniqueArray(images);
+  /* -------------------------------------------------------
+     Boolean fields
+  ------------------------------------------------------- */
 
-  const videos = uniqueArray([
-    ...(parseArrayField(req.body.videos) || []),
-    ...getUploadedVideos(req),
-  ]);
+  [
+    "bestSeller",
+    "newArrival",
+    "onSale",
+    "featured",
+  ].forEach((field) => {
+    if (req.body[field] !== undefined) {
+      const parsed = parseBool(req.body[field]);
 
-  const product = await Product.create({
-    slug,
-    name: String(name).trim(),
-    brand: brand || "OrbitBuy",
-    category,
-    type: type || null,
-    description: description || "",
-    sizes: parseSizes(sizes, ["S", "M", "L", "XL"]),
-    price: Number(price),
-    oldPrice: oldPrice ? Number(oldPrice) : null,
-    rating: 4.5,
-    reviews: 0,
-    stock: stock !== undefined && stock !== "" ? Number(stock) : 20,
-    isBestSeller: parseBool(isBestSeller),
-    isNewArrival: parseBool(isNewArrival),
-    image: images.length > 0 ? images[0] : null,
-    images,
-    videos,
+      if (parsed !== undefined) {
+        body[field] = parsed;
+      }
+    }
   });
 
-  res.status(201).json({ success: true, product: product.toJSON() });
+  /* -------------------------------------------------------
+     Numeric fields
+  ------------------------------------------------------- */
+
+  [
+    "price",
+    "originalPrice",
+    "discount",
+    "stock",
+    "rating",
+    "numReviews",
+  ].forEach((field) => {
+    if (
+      req.body[field] !== undefined &&
+      req.body[field] !== ""
+    ) {
+      const value = Number(req.body[field]);
+
+      if (!Number.isNaN(value)) {
+        body[field] = value;
+      }
+    }
+  });
+
+  /* -------------------------------------------------------
+     Uploaded images
+  ------------------------------------------------------- */
+
+  const uploadedImages = getUploadedImages(req);
+
+  if (uploadedImages.length) {
+    const uploadedImagePaths = uploadedImages.map(
+      (file) => `/uploads/products/${file.filename}`
+    );
+
+    body.images = uniqueArray([
+      ...(body.images || []),
+      ...uploadedImagePaths,
+    ]);
+
+    if (!body.image) {
+      body.image = body.images[0];
+    }
+  }
+
+  /* -------------------------------------------------------
+     Legacy single image
+  ------------------------------------------------------- */
+
+  const legacyImage = getLegacyImage(req);
+
+  if (legacyImage && !body.image) {
+    body.image = `/uploads/products/${legacyImage.filename}`;
+  }
+
+  /* -------------------------------------------------------
+     Uploaded videos
+  ------------------------------------------------------- */
+
+  const uploadedVideos = getUploadedVideos(req);
+
+  if (uploadedVideos.length) {
+    const uploadedVideoPaths = uploadedVideos.map(
+      (file) => `/uploads/products/${file.filename}`
+    );
+
+    body.videos = uniqueArray([
+      ...(body.videos || []),
+      ...uploadedVideoPaths,
+    ]);
+
+    if (!body.video) {
+      body.video = body.videos[0];
+    }
+  }
+
+  /* -------------------------------------------------------
+     Slug validation
+  ------------------------------------------------------- */
+
+  if (
+    body.slug &&
+    Array.isArray(VALID_SLUGS) &&
+    VALID_SLUGS.length &&
+    !VALID_SLUGS.includes(body.slug)
+  ) {
+    throw new ApiError(400, "Invalid product slug.");
+  }
+
+  /* -------------------------------------------------------
+     Create
+  ------------------------------------------------------- */
+
+  const product = await Product.create(body);
+
+  res.status(201).json({
+    success: true,
+    message: "Product created successfully.",
+    product: product.toJSON(),
+  });
 });
 
-/*
-=====================================================
-UPDATE PRODUCT
-PUT /api/products/:id   (admin / manager)
-=====================================================
-*/
+/* =========================================================
+   UPDATE PRODUCT
+========================================================= */
 
 const updateProduct = asyncHandler(async (req, res) => {
-  const product = await Product.findById(req.params.id);
+  const identifier = decodeURIComponent(
+    String(req.params.id || "").trim()
+  );
+
+  if (!identifier) {
+    throw new ApiError(400, "Product identifier is required.");
+  }
+
+  const product = await findProductByIdentifier(identifier);
 
   if (!product) {
     throw new ApiError(404, "Product not found.");
   }
 
-  const {
-    name,
-    brand,
-    category,
-    slug,
-    type,
-    description,
-    price,
-    oldPrice,
-    stock,
-    sizes,
-    isBestSeller,
-    isNewArrival,
-  } = req.body;
+  const body = {
+    ...req.body,
+  };
 
-  if (slug && !VALID_SLUGS.includes(slug)) {
-    throw new ApiError(400, `slug must be one of: ${VALID_SLUGS.join(", ")}`);
+  /* -------------------------------------------------------
+     Arrays
+  ------------------------------------------------------- */
+
+  if (req.body.images !== undefined) {
+    body.images = parseArrayField(req.body.images);
   }
 
-  if (category && !["Men", "Women"].includes(category)) {
-    throw new ApiError(400, 'category must be "Men" or "Women".');
+  if (req.body.videos !== undefined) {
+    body.videos = parseArrayField(req.body.videos);
   }
 
-  if (name !== undefined) product.name = name;
-  if (brand !== undefined) product.brand = brand;
-  if (category !== undefined) product.category = category;
-  if (slug !== undefined) product.slug = slug;
-  if (type !== undefined) product.type = type || null;
-  if (description !== undefined) product.description = description;
-
-  if (price !== undefined && price !== "") product.price = Number(price);
-
-  if (oldPrice !== undefined) {
-    product.oldPrice = oldPrice === "" || oldPrice === null ? null : Number(oldPrice);
+  if (req.body.tags !== undefined) {
+    body.tags = parseArrayField(req.body.tags);
   }
 
-  if (stock !== undefined && stock !== "") product.stock = Number(stock);
-
-  if (sizes !== undefined && sizes !== "") {
-    product.sizes = parseSizes(sizes, product.sizes);
+  if (req.body.colors !== undefined) {
+    body.colors = parseArrayField(req.body.colors);
   }
 
-  if (isBestSeller !== undefined) {
-    product.isBestSeller = parseBool(isBestSeller, product.isBestSeller);
+  if (req.body.sizes !== undefined) {
+    body.sizes = parseSizes(req.body.sizes);
   }
 
-  if (isNewArrival !== undefined) {
-    product.isNewArrival = parseBool(isNewArrival, product.isNewArrival);
+  /* -------------------------------------------------------
+     Boolean fields
+  ------------------------------------------------------- */
+
+  [
+    "bestSeller",
+    "newArrival",
+    "onSale",
+    "featured",
+  ].forEach((field) => {
+    if (req.body[field] !== undefined) {
+      const parsed = parseBool(req.body[field]);
+
+      if (parsed !== undefined) {
+        body[field] = parsed;
+      }
+    }
+  });
+
+  /* -------------------------------------------------------
+     Numeric fields
+  ------------------------------------------------------- */
+
+  [
+    "price",
+    "originalPrice",
+    "discount",
+    "stock",
+    "rating",
+    "numReviews",
+  ].forEach((field) => {
+    if (
+      req.body[field] !== undefined &&
+      req.body[field] !== ""
+    ) {
+      const value = Number(req.body[field]);
+
+      if (!Number.isNaN(value)) {
+        body[field] = value;
+      }
+    }
+  });
+
+  /* -------------------------------------------------------
+     Uploaded images
+  ------------------------------------------------------- */
+
+  const uploadedImages = getUploadedImages(req);
+
+  if (uploadedImages.length) {
+    const uploadedImagePaths = uploadedImages.map(
+      (file) => `/uploads/products/${file.filename}`
+    );
+
+    body.images = uniqueArray([
+      ...(body.images || product.images || []),
+      ...uploadedImagePaths,
+    ]);
+
+    if (!body.image) {
+      body.image = body.images[0];
+    }
   }
 
-  /* ---- Existing images retention ---- */
-  let finalImages = getProductImages(product);
+  /* -------------------------------------------------------
+     Legacy image
+  ------------------------------------------------------- */
 
-  if (req.body.existingImages !== undefined) {
-    finalImages = parseArrayField(req.body.existingImages) || [];
-  }
-
-  /* ---- Existing videos retention ---- */
-  let finalVideos = getProductVideos(product);
-
-  if (req.body.existingVideos !== undefined) {
-    finalVideos = parseArrayField(req.body.existingVideos) || [];
-  }
-
-  /* ---- Newly uploaded media ---- */
-  const newImages = getUploadedImages(req);
   const legacyImage = getLegacyImage(req);
 
-  if (legacyImage && !newImages.includes(legacyImage)) {
-    newImages.unshift(legacyImage);
+  if (legacyImage) {
+    const legacyPath = `/uploads/products/${legacyImage.filename}`;
+
+    body.image = legacyPath;
+
+    body.images = uniqueArray([
+      ...(body.images || product.images || []),
+      legacyPath,
+    ]);
   }
 
-  finalImages = uniqueArray([...finalImages, ...newImages]);
-  finalVideos = uniqueArray([...finalVideos, ...getUploadedVideos(req)]);
+  /* -------------------------------------------------------
+     Uploaded videos
+  ------------------------------------------------------- */
 
-  if (finalImages.length === 0 && req.body.image) {
-    finalImages = [req.body.image];
+  const uploadedVideos = getUploadedVideos(req);
+
+  if (uploadedVideos.length) {
+    const uploadedVideoPaths = uploadedVideos.map(
+      (file) => `/uploads/products/${file.filename}`
+    );
+
+    body.videos = uniqueArray([
+      ...(body.videos || product.videos || []),
+      ...uploadedVideoPaths,
+    ]);
+
+    if (!body.video) {
+      body.video = body.videos[0];
+    }
   }
 
-  product.images = finalImages;
-  product.image = finalImages.length > 0 ? finalImages[0] : null;
-  product.videos = finalVideos;
+  /* -------------------------------------------------------
+     Slug validation
+  ------------------------------------------------------- */
+
+  if (
+    body.slug &&
+    Array.isArray(VALID_SLUGS) &&
+    VALID_SLUGS.length &&
+    !VALID_SLUGS.includes(body.slug)
+  ) {
+    throw new ApiError(400, "Invalid product slug.");
+  }
+
+  /* -------------------------------------------------------
+     Update
+  ------------------------------------------------------- */
+
+  Object.keys(body).forEach((key) => {
+    if (body[key] !== undefined) {
+      product[key] = body[key];
+    }
+  });
 
   await product.save();
 
-  res.json({ success: true, product: product.toJSON() });
+  res.json({
+    success: true,
+    message: "Product updated successfully.",
+    product: product.toJSON(),
+  });
 });
 
-/*
-=====================================================
-DELETE PRODUCT
-DELETE /api/products/:id   (admin / manager)
-=====================================================
-*/
+/* =========================================================
+   DELETE PRODUCT
+========================================================= */
 
 const deleteProduct = asyncHandler(async (req, res) => {
-  const product = await Product.findById(req.params.id);
+  const identifier = decodeURIComponent(
+    String(req.params.id || "").trim()
+  );
+
+  if (!identifier) {
+    throw new ApiError(400, "Product identifier is required.");
+  }
+
+  const product = await findProductByIdentifier(identifier);
 
   if (!product) {
     throw new ApiError(404, "Product not found.");
   }
 
-  await Promise.all([
-    Product.deleteOne({ _id: product._id }),
-    // Don't leave dangling references behind.
-    Review.deleteMany({ productId: product._id }),
-    Cart.updateMany({}, { $pull: { items: { productId: String(product._id) } } }),
-    Wishlist.updateMany({}, { $pull: { products: String(product._id) } }),
-  ]);
+  await product.deleteOne();
 
-  res.json({ success: true, message: "Product deleted successfully." });
+  /* -------------------------------------------------------
+     Remove product references from carts
+  ------------------------------------------------------- */
+
+  try {
+    await Cart.updateMany(
+      {},
+      {
+        $pull: {
+          items: {
+            product: product._id,
+          },
+        },
+      }
+    );
+  } catch (_) {
+    // Cart cleanup should not prevent successful deletion.
+  }
+
+  /* -------------------------------------------------------
+     Remove product references from wishlists
+  ------------------------------------------------------- */
+
+  try {
+    await Wishlist.updateMany(
+      {},
+      {
+        $pull: {
+          products: product._id,
+        },
+      }
+    );
+  } catch (_) {
+    // Wishlist cleanup should not prevent successful deletion.
+  }
+
+  /* -------------------------------------------------------
+     Delete associated reviews
+  ------------------------------------------------------- */
+
+  try {
+    await Review.deleteMany({
+      product: product._id,
+    });
+  } catch (_) {
+    // Review cleanup should not prevent successful deletion.
+  }
+
+  res.json({
+    success: true,
+    message: "Product deleted successfully.",
+  });
 });
+
+/* =========================================================
+   EXPORTS
+========================================================= */
 
 module.exports = {
   getProducts,
@@ -454,5 +1001,4 @@ module.exports = {
   createProduct,
   updateProduct,
   deleteProduct,
-  VALID_SLUGS,
 };
