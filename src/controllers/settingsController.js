@@ -41,6 +41,7 @@ function serialize(m) {
 const getMaintenanceStatus = asyncHandler(async (req, res) => {
   const doc = await getSettingsDoc();
 
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
   res.json({ success: true, maintenance: serialize(doc.maintenance) });
 });
 

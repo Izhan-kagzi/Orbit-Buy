@@ -5,12 +5,18 @@ const { baseOptions } = require("./baseOptions");
 
 const userSchema = new mongoose.Schema(
   {
-    // String IDs are intentionally used for compatibility
-    // with the old JSON backend.
+    // =====================================================
+    // STRING USER ID
+    // =====================================================
+
     _id: {
       type: String,
       default: () => crypto.randomUUID(),
     },
+
+    // =====================================================
+    // BASIC PROFILE
+    // =====================================================
 
     name: {
       type: String,
@@ -42,6 +48,40 @@ const userSchema = new mongoose.Schema(
       trim: true,
     },
 
+    // =====================================================
+    // PROFILE PICTURE
+    // =====================================================
+
+    profilePicture: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    // =====================================================
+    // SHIPPING ADDRESS
+    // =====================================================
+
+    shippingAddress: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    // =====================================================
+    // BILLING ADDRESS
+    // =====================================================
+
+    billingAddress: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    // =====================================================
+    // ROLE
+    // =====================================================
+
     role: {
       type: String,
       enum: ["customer", "manager", "admin"],
@@ -49,7 +89,10 @@ const userSchema = new mongoose.Schema(
       index: true,
     },
 
-    // Manager session tracking
+    // =====================================================
+    // MANAGER SESSION TRACKING
+    // =====================================================
+
     currentSessionId: {
       type: String,
       default: null,
@@ -75,6 +118,10 @@ const userSchema = new mongoose.Schema(
     _id: false,
   }
 );
+
+// =========================================================
+// JSON RESPONSE
+// =========================================================
 
 userSchema.set("toJSON", {
   ...baseOptions.toJSON,

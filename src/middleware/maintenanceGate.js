@@ -56,6 +56,8 @@ async function maintenanceGate(req, res, next) {
       }
     }
 
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+
     return res.status(503).json({
       success: false,
       message:
