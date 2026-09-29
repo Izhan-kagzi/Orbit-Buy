@@ -86,9 +86,43 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 // STATIC UPLOADS
 // ============================================================
 
+const UPLOADS_DIR = path.join(
+  __dirname,
+  "..",
+  "public",
+  "uploads"
+);
+
+const PRODUCT_UPLOADS_DIR = path.join(
+  UPLOADS_DIR,
+  "products"
+);
+
+const LEGACY_CUSTOM_UPLOADS_DIR = path.join(
+  UPLOADS_DIR,
+  "custom"
+);
+
+// Product media is stored in /uploads/products.
+// The second static handler keeps older files that were stored in
+// /uploads/custom accessible through the same product URL.
+app.use(
+  "/uploads/products",
+  express.static(PRODUCT_UPLOADS_DIR, {
+    maxAge: "7d",
+  })
+);
+
+app.use(
+  "/uploads/products",
+  express.static(LEGACY_CUSTOM_UPLOADS_DIR, {
+    maxAge: "7d",
+  })
+);
+
 app.use(
   "/uploads",
-  express.static(path.join(__dirname, "..", "public", "uploads"), {
+  express.static(UPLOADS_DIR, {
     maxAge: "7d",
   })
 );

@@ -803,6 +803,24 @@ const normalizeProductBody = (reqBody = {}) => {
     );
   }
 
+  // AdminProductForm sends the media that should remain on an edit
+  // as existingImages/existingVideos. Normalize those fields into
+  // the schema fields so removals are respected.
+  if (reqBody.existingImages !== undefined) {
+    body.images = parseArrayField(
+      reqBody.existingImages
+    );
+  }
+
+  if (reqBody.existingVideos !== undefined) {
+    body.videos = parseArrayField(
+      reqBody.existingVideos
+    );
+  }
+
+  delete body.existingImages;
+  delete body.existingVideos;
+
   if (reqBody.sizes !== undefined) {
     body.sizes = parseSizes(
       reqBody.sizes

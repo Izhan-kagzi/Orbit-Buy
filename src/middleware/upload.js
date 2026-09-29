@@ -16,6 +16,13 @@ const UPLOAD_ROOT = path.join(
   "uploads"
 );
 
+const PRODUCT_UPLOAD_DIR = path.join(
+  UPLOAD_ROOT,
+  "products"
+);
+
+// Kept for backwards compatibility with files uploaded by
+// older versions of the app.
 const CUSTOM_UPLOAD_DIR = path.join(
   UPLOAD_ROOT,
   "custom"
@@ -34,6 +41,12 @@ CREATE DIRECTORIES
 
 if (!fs.existsSync(CUSTOM_UPLOAD_DIR)) {
   fs.mkdirSync(CUSTOM_UPLOAD_DIR, {
+    recursive: true,
+  });
+}
+
+if (!fs.existsSync(PRODUCT_UPLOAD_DIR)) {
+  fs.mkdirSync(PRODUCT_UPLOAD_DIR, {
     recursive: true,
   });
 }
@@ -100,7 +113,7 @@ CUSTOM / PRODUCT STORAGE
 
 const customStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, CUSTOM_UPLOAD_DIR);
+    cb(null, PRODUCT_UPLOAD_DIR);
   },
 
   filename: (req, file, cb) => {
@@ -311,6 +324,9 @@ module.exports.UPLOAD_DIR =
 
 module.exports.CUSTOM_UPLOAD_DIR =
   CUSTOM_UPLOAD_DIR;
+
+module.exports.PRODUCT_UPLOAD_DIR =
+  PRODUCT_UPLOAD_DIR;
 
 module.exports.PROFILE_UPLOAD_DIR =
   PROFILE_UPLOAD_DIR;
