@@ -65,12 +65,15 @@ const getUploadedVideos = (req) => {
   return fields.flatMap((field) => getFiles(req, field));
 };
 
+// Only the dedicated legacy `image` upload field counts here.
+// (Previously this returned the first file of ANY image field, which
+// replaced the main image every time new gallery images were added.)
 const getLegacyImage = (req) => {
   if (req.file) return req.file;
 
-  const images = getUploadedImages(req);
+  const files = getFiles(req, "image");
 
-  return images.length ? images[0] : null;
+  return files.length ? files[0] : null;
 };
 
 const parseArrayField = (value) => {
@@ -217,8 +220,30 @@ const serializeProduct = (product) => {
     Number.isFinite(oldPrice) &&
     oldPrice > price;
 
+  // Old records may have `image` but no `images[]`, and edited records
+  // can have `images[]` but a null/stale `image`. Always return a
+  // consistent set so every product card has something to show.
+  const images = uniqueArray([
+    ...(Array.isArray(data.images) ? data.images : []),
+    data.image,
+  ]);
+
+  const videos = uniqueArray([
+    ...(Array.isArray(data.videos) ? data.videos : []),
+    data.video,
+  ]);
+
+  const cover =
+    data.image && images.includes(data.image)
+      ? data.image
+      : images[0] || null;
+
   return {
     ...data,
+
+    image: cover,
+    images,
+    videos,
 
     isBestSeller: Boolean(data.isBestSeller),
     isNewArrival: Boolean(data.isNewArrival),
@@ -1073,6 +1098,19 @@ const createProduct = asyncHandler(async (req, res) => {
   }
 
   /* -------------------------------------------------------
+     Keep `image` (main image) in sync with `images`
+  ------------------------------------------------------- */
+
+  if (body.image) {
+    body.images = uniqueArray([
+      body.image,
+      ...(body.images || []),
+    ]);
+  } else if (body.images && body.images.length) {
+    body.image = body.images[0];
+  }
+
+  /* -------------------------------------------------------
      Slug validation
   ------------------------------------------------------- */
 
@@ -1197,6 +1235,25 @@ const updateProduct = asyncHandler(async (req, res) => {
           getProductVideos(product)),
         ...uploadedVideoPaths,
       ]);
+  }
+
+  /* -------------------------------------------------------
+     Keep `image` (main image) in sync with `images`
+
+     The admin form sends the images that should remain
+     (existingImages) plus any new uploads. The main image is
+     always the first one, so removing/reordering images in the
+     form must also update `image`, otherwise the product card
+     keeps pointing at a removed or stale file.
+  ------------------------------------------------------- */
+
+  if (body.images !== undefined) {
+    body.image = body.images[0] || null;
+  } else if (body.image) {
+    body.images = uniqueArray([
+      body.image,
+      ...getProductImages(product),
+    ]);
   }
 
   /* -------------------------------------------------------
