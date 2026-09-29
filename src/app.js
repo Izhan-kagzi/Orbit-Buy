@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
 const path = require("path");
+const fs = require("fs");
 
 const { isConnected } = require("./config/db");
 
@@ -18,14 +19,20 @@ const userRoutes = require("./routes/userRoutes");
 const reviewRoutes = require("./routes/reviewRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
 
-const { errorHandler, notFound } = require("./middleware/errorHandler");
+const {
+  errorHandler,
+  notFound,
+} = require("./middleware/errorHandler");
+
 const maintenanceGate = require("./middleware/maintenanceGate");
 
 const app = express();
 
-// ============================================================
-// CORS
-// ============================================================
+/*
+============================================================
+CORS
+============================================================
+*/
 
 const defaultOrigins = [
   "http://localhost:5173",
@@ -39,7 +46,9 @@ const allowedOrigins = [
   ...new Set(
     [
       ...defaultOrigins,
-      ...(process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : []),
+      ...(process.env.CORS_ORIGIN
+        ? process.env.CORS_ORIGIN.split(",")
+        : []),
     ]
       .map((origin) => origin.trim())
       .filter(Boolean)
@@ -49,47 +58,111 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests without an Origin header, such as Postman and
-      // server-to-server requests.
-      if (!origin) return callback(null, true);
+      /*
+      --------------------------------------------------------
+      Requests without Origin
+      --------------------------------------------------------
 
-      if (allowedOrigins.includes(origin)) return callback(null, true);
+      Allows:
+      - Postman
+      - server-to-server requests
+      - health checks
+      */
 
-      // Any localhost port during development.
-      if (/^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) {
+      if (!origin) {
         return callback(null, true);
       }
 
-      console.warn(`CORS blocked origin: ${origin}`);
+      /*
+      --------------------------------------------------------
+      Explicit allowed origins
+      --------------------------------------------------------
+      */
 
-      // Reject without throwing — a thrown error here surfaced as an
-      // opaque 500 instead of a clean CORS rejection.
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      /*
+      --------------------------------------------------------
+      Allow any localhost / 127.0.0.1 development port
+      --------------------------------------------------------
+      */
+
+      if (
+        /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(
+          origin
+        )
+      ) {
+        return callback(null, true);
+      }
+
+      console.warn(
+        `CORS blocked origin: ${origin}`
+      );
+
+      /*
+      Do not throw here.
+
+      Returning false prevents the CORS headers from
+      being added without turning the request into an
+      opaque server-side 500.
+      */
+
       return callback(null, false);
     },
 
     credentials: true,
 
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    methods: [
+      "GET",
+      "POST",
+      "PUT",
+      "PATCH",
+      "DELETE",
+      "OPTIONS",
+    ],
 
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+    ],
   })
 );
 
-// ============================================================
-// BODY PARSERS
-// ============================================================
+/*
+============================================================
+BODY PARSERS
+============================================================
+*/
 
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(
+  express.json({
+    limit: "10mb",
+  })
+);
 
-// ============================================================
-// STATIC UPLOADS
-// ============================================================
+app.use(
+  express.urlencoded({
+    extended: true,
+    limit: "10mb",
+  })
+);
 
-const UPLOADS_DIR = path.join(
+/*
+============================================================
+STATIC UPLOAD DIRECTORIES
+============================================================
+*/
+
+const PUBLIC_DIR = path.join(
   __dirname,
   "..",
-  "public",
+  "public"
+);
+
+const UPLOADS_DIR = path.join(
+  PUBLIC_DIR,
   "uploads"
 );
 
@@ -103,88 +176,267 @@ const LEGACY_CUSTOM_UPLOADS_DIR = path.join(
   "custom"
 );
 
-// Product media is stored in /uploads/products.
-// The second static handler keeps older files that were stored in
-// /uploads/custom accessible through the same product URL.
+const PROFILE_UPLOADS_DIR = path.join(
+  UPLOADS_DIR,
+  "profiles"
+);
+
+/*
+============================================================
+ENSURE UPLOAD DIRECTORIES EXIST
+============================================================
+*/
+
+[
+  PUBLIC_DIR,
+  UPLOADS_DIR,
+  PRODUCT_UPLOADS_DIR,
+  LEGACY_CUSTOM_UPLOADS_DIR,
+  PROFILE_UPLOADS_DIR,
+].forEach((directory) => {
+  if (!fs.existsSync(directory)) {
+    fs.mkdirSync(directory, {
+      recursive: true,
+    });
+  }
+});
+
+/*
+============================================================
+STATIC FILE SERVING
+============================================================
+
+Product media:
+
+Physical location:
+
+public/uploads/products/
+
+Browser URL:
+
+/uploads/products/<filename>
+
+Example:
+
+http://localhost:5000/uploads/products/product-123.jpg
+
+Production:
+
+https://orbit-buy.onrender.com/uploads/products/product-123.jpg
+============================================================
+*/
+
+/*
+------------------------------------------------------------
+PRODUCT UPLOADS
+------------------------------------------------------------
+*/
+
 app.use(
   "/uploads/products",
   express.static(PRODUCT_UPLOADS_DIR, {
     maxAge: "7d",
+    fallthrough: true,
   })
 );
 
+/*
+------------------------------------------------------------
+LEGACY PRODUCT UPLOADS
+------------------------------------------------------------
+
+Older versions of Orbit Buy may have stored product
+files inside:
+
+public/uploads/custom/
+
+Keep those files accessible through:
+
+/uploads/products/<filename>
+------------------------------------------------------------
+*/
+
 app.use(
   "/uploads/products",
-  express.static(LEGACY_CUSTOM_UPLOADS_DIR, {
-    maxAge: "7d",
-  })
+  express.static(
+    LEGACY_CUSTOM_UPLOADS_DIR,
+    {
+      maxAge: "7d",
+      fallthrough: true,
+    }
+  )
 );
+
+/*
+------------------------------------------------------------
+GENERAL UPLOADS
+------------------------------------------------------------
+
+This keeps these URLs available:
+
+/uploads/profiles/...
+/uploads/custom/...
+/uploads/products/...
+------------------------------------------------------------
+*/
 
 app.use(
   "/uploads",
   express.static(UPLOADS_DIR, {
     maxAge: "7d",
+    fallthrough: true,
   })
 );
 
-// ============================================================
-// LOGGER
-// ============================================================
+/*
+============================================================
+LOGGER
+============================================================
+*/
 
 if (process.env.NODE_ENV !== "test") {
   app.use(morgan("dev"));
 }
 
-// ============================================================
-// HEALTH CHECK
-// ============================================================
+/*
+============================================================
+HEALTH CHECK
+============================================================
+*/
 
-app.get("/api/health", (req, res) => {
-  const dbUp = isConnected();
+app.get(
+  "/api/health",
+  (req, res) => {
+    const dbUp = isConnected();
 
-  res.status(dbUp ? 200 : 503).json({
-    success: dbUp,
-    message: dbUp
-      ? "Orbit Buy API is running."
-      : "Orbit Buy API is running, but MongoDB is not connected.",
-    database: dbUp ? "connected" : "disconnected",
-    timestamp: new Date().toISOString(),
-  });
-});
+    res.status(
+      dbUp ? 200 : 503
+    ).json({
+      success: dbUp,
 
-// ============================================================
-// MAINTENANCE MODE
-// ============================================================
-// Gate every /api/* request below except the always-allowed list inside
-// maintenanceGate itself (health, the maintenance status endpoint, and
-// login/me/logout so staff can still sign in and out).
+      message: dbUp
+        ? "Orbit Buy API is running."
+        : "Orbit Buy API is running, but MongoDB is not connected.",
+
+      database: dbUp
+        ? "connected"
+        : "disconnected",
+
+      timestamp:
+        new Date().toISOString(),
+    });
+  }
+);
+
+/*
+============================================================
+MAINTENANCE MODE
+============================================================
+*/
+
+/*
+The maintenance gate is applied to API routes below.
+
+The middleware itself controls which routes remain available
+during maintenance, such as:
+
+- health
+- maintenance status
+- staff authentication
+============================================================
+*/
 
 app.use(maintenanceGate);
 
-// ============================================================
-// API ROUTES
-// ============================================================
+/*
+============================================================
+API ROUTES
+============================================================
+*/
 
-app.use("/api/settings", settingsRoutes);
-app.use("/api/auth", authRoutes);
-app.use("/api/products", productRoutes);
-app.use("/api/flash-sale", flashSaleRoutes);
-// Alias — some clients call /api/flash-sales (plural).
-app.use("/api/flash-sales", flashSaleRoutes);
-app.use("/api/cart", cartRoutes);
-app.use("/api/wishlist", wishlistRoutes);
-app.use("/api/orders", orderRoutes);
-app.use("/api/coupons", couponRoutes);
-app.use("/api/ai", aiRoutes);
-app.use("/api/payments", paymentRoutes);
-app.use("/api/users", userRoutes);
-app.use("/api/reviews", reviewRoutes);
+app.use(
+  "/api/settings",
+  settingsRoutes
+);
 
-// ============================================================
-// 404 + ERROR HANDLING
-// ============================================================
+app.use(
+  "/api/auth",
+  authRoutes
+);
+
+app.use(
+  "/api/products",
+  productRoutes
+);
+
+app.use(
+  "/api/flash-sale",
+  flashSaleRoutes
+);
+
+/*
+Alias for clients using the plural endpoint.
+*/
+
+app.use(
+  "/api/flash-sales",
+  flashSaleRoutes
+);
+
+app.use(
+  "/api/cart",
+  cartRoutes
+);
+
+app.use(
+  "/api/wishlist",
+  wishlistRoutes
+);
+
+app.use(
+  "/api/orders",
+  orderRoutes
+);
+
+app.use(
+  "/api/coupons",
+  couponRoutes
+);
+
+app.use(
+  "/api/ai",
+  aiRoutes
+);
+
+app.use(
+  "/api/payments",
+  paymentRoutes
+);
+
+app.use(
+  "/api/users",
+  userRoutes
+);
+
+app.use(
+  "/api/reviews",
+  reviewRoutes
+);
+
+/*
+============================================================
+404 + ERROR HANDLING
+============================================================
+*/
 
 app.use(notFound);
+
 app.use(errorHandler);
+
+/*
+============================================================
+EXPORT
+============================================================
+*/
 
 module.exports = app;

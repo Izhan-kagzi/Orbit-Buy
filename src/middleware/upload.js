@@ -21,8 +21,6 @@ const PRODUCT_UPLOAD_DIR = path.join(
   "products"
 );
 
-// Kept for backwards compatibility with files uploaded by
-// older versions of the app.
 const CUSTOM_UPLOAD_DIR = path.join(
   UPLOAD_ROOT,
   "custom"
@@ -39,23 +37,18 @@ CREATE DIRECTORIES
 =====================================================
 */
 
-if (!fs.existsSync(CUSTOM_UPLOAD_DIR)) {
-  fs.mkdirSync(CUSTOM_UPLOAD_DIR, {
-    recursive: true,
-  });
-}
-
-if (!fs.existsSync(PRODUCT_UPLOAD_DIR)) {
-  fs.mkdirSync(PRODUCT_UPLOAD_DIR, {
-    recursive: true,
-  });
-}
-
-if (!fs.existsSync(PROFILE_UPLOAD_DIR)) {
-  fs.mkdirSync(PROFILE_UPLOAD_DIR, {
-    recursive: true,
-  });
-}
+[
+  UPLOAD_ROOT,
+  PRODUCT_UPLOAD_DIR,
+  CUSTOM_UPLOAD_DIR,
+  PROFILE_UPLOAD_DIR,
+].forEach((directory) => {
+  if (!fs.existsSync(directory)) {
+    fs.mkdirSync(directory, {
+      recursive: true,
+    });
+  }
+});
 
 /*
 =====================================================
@@ -84,13 +77,15 @@ GENERAL FILE FILTER
 */
 
 function fileFilter(req, file, cb) {
-  const isImage = allowedImageTypes.includes(
-    file.mimetype
-  );
+  const mimetype = String(
+    file.mimetype || ""
+  ).toLowerCase();
 
-  const isVideo = allowedVideoTypes.includes(
-    file.mimetype
-  );
+  const isImage =
+    allowedImageTypes.includes(mimetype);
+
+  const isVideo =
+    allowedVideoTypes.includes(mimetype);
 
   if (isImage || isVideo) {
     return cb(null, true);
@@ -107,23 +102,49 @@ function fileFilter(req, file, cb) {
 
 /*
 =====================================================
-CUSTOM / PRODUCT STORAGE
+PRODUCT STORAGE
 =====================================================
 */
 
-const customStorage = multer.diskStorage({
+const productStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, PRODUCT_UPLOAD_DIR);
   },
 
   filename: (req, file, cb) => {
-    const ext =
-      path.extname(file.originalname).toLowerCase() ||
-      ".jpg";
+    const originalExtension = path
+      .extname(file.originalname || "")
+      .toLowerCase();
 
-    const uniqueName = `${Date.now()}-${Math.round(
+    /*
+    ---------------------------------------------------
+    Fallback extensions
+    ---------------------------------------------------
+    */
+
+    let extension = originalExtension;
+
+    if (!extension) {
+      if (
+        allowedVideoTypes.includes(
+          String(file.mimetype || "").toLowerCase()
+        )
+      ) {
+        extension = ".mp4";
+      } else {
+        extension = ".jpg";
+      }
+    }
+
+    /*
+    ---------------------------------------------------
+    Safe unique filename
+    ---------------------------------------------------
+    */
+
+    const uniqueName = `product-${Date.now()}-${Math.round(
       Math.random() * 1e9
-    )}${ext}`;
+    )}${extension}`;
 
     cb(null, uniqueName);
   },
@@ -133,9 +154,6 @@ const customStorage = multer.diskStorage({
 =====================================================
 PROFILE PICTURE STORAGE
 =====================================================
-
-Profile pictures are stored separately from product
-uploads so they can be managed independently.
 */
 
 const profileStorage = multer.diskStorage({
@@ -144,15 +162,21 @@ const profileStorage = multer.diskStorage({
   },
 
   filename: (req, file, cb) => {
-    const ext =
-      path.extname(file.originalname).toLowerCase() ||
-      ".jpg";
+    const originalExtension = path
+      .extname(file.originalname || "")
+      .toLowerCase();
+
+    const extension =
+      originalExtension || ".jpg";
 
     const userId = String(
       req.user?.id || "user"
-    ).replace(/[^a-zA-Z0-9_-]/g, "");
+    ).replace(
+      /[^a-zA-Z0-9_-]/g,
+      ""
+    );
 
-    const uniqueName = `profile-${userId}-${Date.now()}${ext}`;
+    const uniqueName = `profile-${userId}-${Date.now()}${extension}`;
 
     cb(null, uniqueName);
   },
@@ -162,44 +186,62 @@ const profileStorage = multer.diskStorage({
 =====================================================
 GENERAL MULTER INSTANCE
 =====================================================
+
+Used by:
+- Product uploads
+- Flash sale images
+- Other general uploads
+=====================================================
 */
 
 const upload = multer({
-  storage: customStorage,
+  storage: productStorage,
 
   fileFilter,
 
   limits: {
-    // Existing product/video upload limit.
+    /*
+    Maximum individual file size:
+    100 MB
+
+    This allows product videos to be uploaded
+    without being rejected by Multer.
+    */
     fileSize: 100 * 1024 * 1024,
 
+    /*
+    Maximum number of non-file fields.
+    */
     fields: 30,
 
+    /*
+    Maximum size of an individual text field.
+    */
     fieldSize: 10 * 1024 * 1024,
   },
 });
 
 /*
 =====================================================
-PROFILE PICTURE MULTER INSTANCE
+PROFILE PICTURE MULTER
 =====================================================
-
-Profile pictures:
-- Images only
-- Maximum 5 MB
-- One file only
 */
 
 const profileUpload = multer({
   storage: profileStorage,
 
   fileFilter: (req, file, cb) => {
-    if (!allowedImageTypes.includes(file.mimetype)) {
+    const mimetype = String(
+      file.mimetype || ""
+    ).toLowerCase();
+
+    if (!allowedImageTypes.includes(mimetype)) {
       const error = new Error(
         "Profile picture must be a JPG, JPEG, PNG, WEBP or AVIF image."
       );
 
-      error.code = "INVALID_PROFILE_IMAGE_TYPE";
+      error.code =
+        "INVALID_PROFILE_IMAGE_TYPE";
 
       return cb(error, false);
     }
@@ -208,6 +250,10 @@ const profileUpload = multer({
   },
 
   limits: {
+    /*
+    Profile pictures:
+    Maximum 5 MB
+    */
     fileSize: 5 * 1024 * 1024,
 
     files: 1,
@@ -218,7 +264,7 @@ const profileUpload = multer({
 
 /*
 =====================================================
-ERROR-SAFE WRAPPER
+ERROR-SAFE MULTER WRAPPER
 =====================================================
 */
 
@@ -236,14 +282,25 @@ function handleUpload(middleware) {
 
 /*
 =====================================================
-PRODUCT MEDIA
+PRODUCT MEDIA UPLOAD
 =====================================================
 
-Supports:
+Accepted multipart fields:
 
-image  -> one legacy image
-images -> up to 10 images
-videos -> up to 5 videos
+image
+  → maximum 1 image
+  → legacy single-image support
+
+images
+  → maximum 10 images
+
+videos
+  → maximum 5 videos
+
+The uploaded files are physically stored at:
+
+public/uploads/products/
+=====================================================
 */
 
 const uploadProductMedia = handleUpload(
@@ -283,11 +340,7 @@ PROFILE PICTURE
 Expected multipart field:
 
 profilePicture
-
-Example:
-
-FormData:
-profilePicture = selected image
+=====================================================
 */
 
 const uploadProfilePicture = handleUpload(
@@ -319,8 +372,14 @@ module.exports.uploadFlashSaleImages =
 module.exports.uploadProfilePicture =
   uploadProfilePicture;
 
+/*
+-----------------------------------------------------
+Directory exports
+-----------------------------------------------------
+*/
+
 module.exports.UPLOAD_DIR =
-  CUSTOM_UPLOAD_DIR;
+  PRODUCT_UPLOAD_DIR;
 
 module.exports.CUSTOM_UPLOAD_DIR =
   CUSTOM_UPLOAD_DIR;
@@ -330,3 +389,19 @@ module.exports.PRODUCT_UPLOAD_DIR =
 
 module.exports.PROFILE_UPLOAD_DIR =
   PROFILE_UPLOAD_DIR;
+
+/*
+-----------------------------------------------------
+Allowed type exports
+-----------------------------------------------------
+
+Useful if another backend file needs to validate
+the same media types.
+-----------------------------------------------------
+*/
+
+module.exports.allowedImageTypes =
+  allowedImageTypes;
+
+module.exports.allowedVideoTypes =
+  allowedVideoTypes;
