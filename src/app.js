@@ -161,10 +161,10 @@ const PUBLIC_DIR = path.join(
   "public"
 );
 
-const UPLOADS_DIR = path.join(
-  PUBLIC_DIR,
-  "uploads"
-);
+// Must match UPLOAD_ROOT in middleware/upload.js
+const UPLOADS_DIR = process.env.UPLOAD_DIR
+  ? path.resolve(process.env.UPLOAD_DIR)
+  : path.join(PUBLIC_DIR, "uploads");
 
 const PRODUCT_UPLOADS_DIR = path.join(
   UPLOADS_DIR,
@@ -231,6 +231,12 @@ https://orbit-buy.onrender.com/uploads/products/product-123.jpg
 PRODUCT UPLOADS
 ------------------------------------------------------------
 */
+
+// Let the Vercel frontend (a different origin) embed uploaded media.
+app.use("/uploads", (req, res, next) => {
+  res.set("Cross-Origin-Resource-Policy", "cross-origin");
+  next();
+});
 
 app.use(
   "/uploads/products",

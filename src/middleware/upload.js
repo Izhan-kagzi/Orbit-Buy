@@ -8,13 +8,12 @@ UPLOAD DIRECTORIES
 =====================================================
 */
 
-const UPLOAD_ROOT = path.join(
-  __dirname,
-  "..",
-  "..",
-  "public",
-  "uploads"
-);
+// Set UPLOAD_DIR to a PERSISTENT location in production (e.g. a Render
+// Disk mount such as /var/data/uploads). Without it, files are written
+// inside the app folder, which Render wipes on every deploy/restart.
+const UPLOAD_ROOT = process.env.UPLOAD_DIR
+  ? path.resolve(process.env.UPLOAD_DIR)
+  : path.join(__dirname, "..", "..", "public", "uploads");
 
 const PRODUCT_UPLOAD_DIR = path.join(
   UPLOAD_ROOT,
