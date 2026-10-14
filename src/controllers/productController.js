@@ -4,6 +4,7 @@ const Cart = require("../models/Cart");
 const Wishlist = require("../models/Wishlist");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
+const { deleteMediaByPaths } = require("../utils/gridfs");
 
 const { VALID_SLUGS } = Product;
 
@@ -1268,6 +1269,11 @@ const updateProduct = asyncHandler(async (req, res) => {
      Update
   ------------------------------------------------------- */
 
+  const previousMedia = [
+    ...getProductImages(product),
+    ...getProductVideos(product),
+  ];
+
   Object.keys(body).forEach(
     (key) => {
       if (
@@ -1280,6 +1286,16 @@ const updateProduct = asyncHandler(async (req, res) => {
   );
 
   await product.save();
+
+  // Remove GridFS files the admin took off this product.
+  const keptMedia = new Set([
+    ...getProductImages(product),
+    ...getProductVideos(product),
+  ]);
+
+  deleteMediaByPaths(
+    previousMedia.filter((item) => !keptMedia.has(item))
+  );
 
   res.json({
     success: true,
@@ -1318,7 +1334,14 @@ const deleteProduct = asyncHandler(async (req, res) => {
     );
   }
 
+  const mediaToDelete = [
+    ...getProductImages(product),
+    ...getProductVideos(product),
+  ];
+
   await product.deleteOne();
+
+  deleteMediaByPaths(mediaToDelete);
 
   /* -------------------------------------------------------
      Remove product references from carts

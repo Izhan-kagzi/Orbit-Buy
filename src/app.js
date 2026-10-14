@@ -18,6 +18,7 @@ const paymentRoutes = require("./routes/paymentRoutes");
 const userRoutes = require("./routes/userRoutes");
 const reviewRoutes = require("./routes/reviewRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
+const mediaRoutes = require("./routes/mediaRoutes");
 
 const {
   errorHandler,
@@ -237,6 +238,10 @@ app.use("/uploads", (req, res, next) => {
   res.set("Cross-Origin-Resource-Policy", "cross-origin");
   next();
 });
+
+// Product / flash-sale media stored in MongoDB (GridFS) — checked first.
+// Falls through to the static folders for bundled/legacy files.
+app.use("/uploads", mediaRoutes);
 
 app.use(
   "/uploads/products",

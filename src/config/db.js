@@ -9,7 +9,9 @@ const mongoose = require("mongoose");
  * migration source (see src/scripts/migrate.js).
  */
 
+// Accepts ATLAS_URI (used in .env), MONGO_URI or MONGODB_URI.
 const MONGO_URI =
+  process.env.ATLAS_URI ||
   process.env.MONGO_URI ||
   process.env.MONGODB_URI ||
   "mongodb://127.0.0.1:27017/orbit_buy";

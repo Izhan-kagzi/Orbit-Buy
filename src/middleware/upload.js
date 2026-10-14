@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
+const { gridfsStorage } = require("../utils/gridfs");
 
 /*
 =====================================================
@@ -105,47 +106,29 @@ PRODUCT STORAGE
 =====================================================
 */
 
-const productStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, PRODUCT_UPLOAD_DIR);
-  },
-
-  filename: (req, file, cb) => {
+// Product / flash-sale media is stored INSIDE MongoDB (GridFS), not on
+// the server disk, so it survives restarts and redeploys. The public
+// URL stays /uploads/products/<filename> (served from GridFS by
+// src/routes/mediaRoutes.js), so the frontend needs no changes.
+const productStorage = gridfsStorage({
+  getFilename: (req, file) => {
     const originalExtension = path
       .extname(file.originalname || "")
       .toLowerCase();
 
-    /*
-    ---------------------------------------------------
-    Fallback extensions
-    ---------------------------------------------------
-    */
-
     let extension = originalExtension;
 
     if (!extension) {
-      if (
-        allowedVideoTypes.includes(
-          String(file.mimetype || "").toLowerCase()
-        )
-      ) {
-        extension = ".mp4";
-      } else {
-        extension = ".jpg";
-      }
+      extension = allowedVideoTypes.includes(
+        String(file.mimetype || "").toLowerCase()
+      )
+        ? ".mp4"
+        : ".jpg";
     }
 
-    /*
-    ---------------------------------------------------
-    Safe unique filename
-    ---------------------------------------------------
-    */
-
-    const uniqueName = `product-${Date.now()}-${Math.round(
+    return `product-${Date.now()}-${Math.round(
       Math.random() * 1e9
     )}${extension}`;
-
-    cb(null, uniqueName);
   },
 });
 
