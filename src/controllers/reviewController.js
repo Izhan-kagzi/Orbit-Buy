@@ -42,8 +42,14 @@ const getProductReviews = asyncHandler(async (req, res) => {
   }
 
   // Staff previewing the product page see pending reviews too.
+  // A logged-in customer also sees their OWN review while it is still
+  // awaiting approval, so it never looks like it vanished.
   const filter = { productId: String(productId) };
-  if (!isStaff(req)) filter.approved = true;
+  if (!isStaff(req)) {
+    filter.$or = req.user
+      ? [{ approved: true }, { userId: req.user.id }]
+      : [{ approved: true }];
+  }
 
   const reviews = await Review.find(filter).sort({ createdAt: -1 });
 
@@ -113,12 +119,24 @@ const getAllReviews = asyncHandler(async (req, res) => {
 
   const reviews = await Review.find(filter).sort({ createdAt: -1 });
 
+  // Attach each product's cover image so the dashboard can show it.
+  const productIds = [...new Set(reviews.map((r) => String(r.productId)))];
+  const products = await Product.find({ _id: { $in: productIds } })
+    .select("image images")
+    .lean();
+  const imageById = new Map(
+    products.map((p) => [String(p._id), p.image || (p.images && p.images[0]) || null])
+  );
+
   res.json({
     success: true,
     count: reviews.length,
     pending: await Review.countDocuments({ approved: false }),
     unanswered: await Review.countDocuments({ reply: null }),
-    reviews: reviews.map((review) => review.toJSON()),
+    reviews: reviews.map((review) => ({
+      ...review.toJSON(),
+      productImage: imageById.get(String(review.productId)) || null,
+    })),
   });
 });
 
