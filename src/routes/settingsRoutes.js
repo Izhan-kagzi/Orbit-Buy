@@ -5,7 +5,7 @@ const {
   updateMaintenance,
 } = require("../controllers/settingsController");
 
-const { protect, adminOnly } = require("../middleware/auth");
+const { protect, staffOnly } = require("../middleware/auth");
 
 const router = express.Router();
 
@@ -13,7 +13,7 @@ const router = express.Router();
 // maintenance page, and it also has to work while maintenance is on.
 router.get("/maintenance", getMaintenanceStatus);
 
-// Admin only — turn maintenance on/off and set its time window/message.
-router.put("/maintenance", protect, adminOnly, updateMaintenance);
+// Admin or manager — turn maintenance on/off and set its time window/message.
+router.put("/maintenance", protect, staffOnly, updateMaintenance);
 
 module.exports = router;

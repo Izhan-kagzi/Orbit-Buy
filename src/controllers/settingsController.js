@@ -1,6 +1,7 @@
 const Settings = require("../models/Settings");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
+const { invalidateMaintenanceCache } = require("../middleware/maintenanceGate");
 
 const SETTINGS_KEY = "maintenance";
 
@@ -34,6 +35,8 @@ function serialize(m) {
     startTime: m?.startTime || null,
     endTime: m?.endTime || null,
     message: m?.message || "",
+    updatedBy: m?.updatedBy?.name || null,
+    serverTime: new Date().toISOString(),
   };
 }
 
@@ -45,10 +48,16 @@ const getMaintenanceStatus = asyncHandler(async (req, res) => {
   res.json({ success: true, maintenance: serialize(doc.maintenance) });
 });
 
-// @route PUT /api/settings/maintenance (admin only)
+// @route PUT /api/settings/maintenance (admin or manager)
 // body: { enabled?, startTime?, endTime?, message? }
 const updateMaintenance = asyncHandler(async (req, res) => {
   const { enabled, startTime, endTime, message } = req.body;
+
+  for (const value of [startTime, endTime]) {
+    if (value && Number.isNaN(new Date(value).getTime())) {
+      throw new ApiError(400, "Invalid maintenance date/time.");
+    }
+  }
 
   const doc = await getSettingsDoc();
 
@@ -76,9 +85,21 @@ const updateMaintenance = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Maintenance end time must be after the start time.");
   }
 
+  // Turning it on with a window that already ended would silently do
+  // nothing, so tell staff instead.
+  if (
+    doc.maintenance.enabled &&
+    doc.maintenance.endTime &&
+    doc.maintenance.endTime.getTime() <= Date.now()
+  ) {
+    throw new ApiError(400, "Maintenance end time is already in the past.");
+  }
+
   doc.maintenance.updatedBy = { id: req.user.id, name: req.user.name };
 
   await doc.save();
+
+  invalidateMaintenanceCache();
 
   res.json({ success: true, maintenance: serialize(doc.maintenance) });
 });

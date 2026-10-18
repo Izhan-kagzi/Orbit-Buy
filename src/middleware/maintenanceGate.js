@@ -4,6 +4,26 @@ const { verifyToken } = require("../utils/jwt");
 
 const SETTINGS_KEY = "maintenance";
 
+// The gate runs on every API request, so keep a very short in-memory cache
+// instead of hitting Mongo each time. The settings controller clears it the
+// moment staff change maintenance, so toggles still apply instantly. The
+// time window is re-evaluated on every request, so start/end times are exact.
+const CACHE_TTL_MS = 3000;
+let cache = { doc: null, at: 0 };
+
+function invalidateMaintenanceCache() {
+  cache = { doc: null, at: 0 };
+}
+
+async function loadSettings() {
+  if (cache.at && Date.now() - cache.at < CACHE_TTL_MS) return cache.doc;
+
+  const doc = await Settings.findOne({ key: SETTINGS_KEY }).lean();
+  cache = { doc, at: Date.now() };
+
+  return doc;
+}
+
 // Always reachable, maintenance or not — health checks, the maintenance
 // status itself, and the auth endpoints an admin/manager needs to sign in
 // and sign out.
@@ -36,7 +56,7 @@ async function maintenanceGate(req, res, next) {
   try {
     if (ALWAYS_ALLOWED.has(req.path)) return next();
 
-    const doc = await Settings.findOne({ key: SETTINGS_KEY }).lean();
+    const doc = await loadSettings();
 
     if (!isActive(doc?.maintenance)) return next();
 
@@ -75,3 +95,4 @@ async function maintenanceGate(req, res, next) {
 }
 
 module.exports = maintenanceGate;
+module.exports.invalidateMaintenanceCache = invalidateMaintenanceCache;
