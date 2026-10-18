@@ -1,6 +1,4 @@
 const Settings = require("../models/Settings");
-const User = require("../models/User");
-const { verifyToken } = require("../utils/jwt");
 
 const SETTINGS_KEY = "maintenance";
 
@@ -47,10 +45,12 @@ function isActive(m) {
 }
 
 /**
- * Blocks customer-facing API traffic while maintenance mode is on. Staff
- * (admin/manager) are always let through so they can keep working and so
- * an admin can turn maintenance back off. A check failure never takes the
- * whole site down — it just falls through and lets the request proceed.
+ * Blocks ALL API traffic (customers, managers and admins alike) while
+ * maintenance mode is on. Only ALWAYS_ALLOWED routes stay open: health,
+ * the maintenance status/toggle (the toggle itself still requires an
+ * admin/manager token) and login/logout, so staff can sign in and switch
+ * maintenance off. A check failure never takes the whole site down — it
+ * just falls through and lets the request proceed.
  */
 async function maintenanceGate(req, res, next) {
   try {
@@ -59,22 +59,6 @@ async function maintenanceGate(req, res, next) {
     const doc = await loadSettings();
 
     if (!isActive(doc?.maintenance)) return next();
-
-    const authHeader = req.headers.authorization || "";
-
-    if (authHeader.startsWith("Bearer ")) {
-      try {
-        const decoded = verifyToken(authHeader.split(" ")[1]);
-        const user = await User.findById(decoded.id).lean();
-
-        if (user && ["admin", "manager"].includes(user.role)) {
-          return next();
-        }
-      } catch {
-        // Invalid/expired token — fall through to the blocked response
-        // below rather than letting protect() throw its own 401.
-      }
-    }
 
     res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
 
