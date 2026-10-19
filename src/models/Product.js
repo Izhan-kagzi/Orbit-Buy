@@ -23,7 +23,7 @@ const VALID_SLUGS = [
   "women-skirts",
   "women-shirts",
   "women-jumpsuits",
-  "women-leggings",
+  
   "women-shrugs",
   "women-cardigans",
 ];
