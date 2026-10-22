@@ -14,6 +14,7 @@ const asyncHandler = require("../utils/asyncHandler");
 
 const PAYMENT_METHODS = ["cod", "card", "upi", "netbanking"];
 const ORDER_STATUSES = [
+  "Pending",
   "Confirmed",
   "Processing",
   "Shipped",
@@ -245,6 +246,18 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
 
   if (status === "Delivered" && order.paymentMethod === "cod") {
     order.paymentStatus = "Paid";
+  }
+
+  // A staff-cancelled order that was already paid is marked refunded.
+  if (status === "Cancelled" && order.paymentStatus === "Paid") {
+    order.paymentStatus = "Refunded";
+  }
+
+  // Any pending customer cancellation request is settled by this change.
+  if (status === "Cancelled" && order.cancellation?.status === "requested") {
+    order.cancellation.status = "approved";
+    order.cancellation.resolvedAt = new Date();
+    order.cancellation.resolvedBy = req.user.name;
   }
 
   await order.save();
