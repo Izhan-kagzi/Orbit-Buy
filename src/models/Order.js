@@ -60,6 +60,31 @@ const cancellationSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// Live tracking: opens when the order is placed, closes on cancellation
+// (automatically) or after delivery (by an admin/manager only).
+const liveSchema = new mongoose.Schema(
+  {
+    active: { type: Boolean, default: false, index: true },
+    openedAt: { type: Date, default: Date.now },
+    closedAt: { type: Date, default: null },
+    closedBy: { type: String, default: null },
+    closeReason: {
+      type: String,
+      enum: [null, "cancelled", "delivered"],
+      default: null,
+    },
+  },
+  { _id: false }
+);
+
+const timelineEntrySchema = new mongoose.Schema(
+  {
+    status: String,
+    at: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const orderSchema = new mongoose.Schema(
   {
     _id: { type: String, default: generateOrderId },
@@ -97,6 +122,8 @@ const orderSchema = new mongoose.Schema(
       index: true,
     },
     cancellation: { type: cancellationSchema, default: () => ({}) },
+    live: { type: liveSchema, default: () => ({}) },
+    timeline: { type: [timelineEntrySchema], default: [] },
   },
   { ...baseOptions, _id: false }
 );

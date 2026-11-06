@@ -19,6 +19,7 @@ const userRoutes = require("./routes/userRoutes");
 const reviewRoutes = require("./routes/reviewRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
 const mediaRoutes = require("./routes/mediaRoutes");
+const pushRoutes = require("./routes/pushRoutes");
 
 const {
   errorHandler,
@@ -432,6 +433,11 @@ app.use(
 app.use(
   "/api/reviews",
   reviewRoutes
+);
+
+app.use(
+  "/api/push",
+  pushRoutes
 );
 
 /*

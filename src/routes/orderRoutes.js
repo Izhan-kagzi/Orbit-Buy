@@ -10,6 +10,9 @@ const {
   requestCancellation,
   getCancellationRequests,
   resolveCancellation,
+  getLiveOrders,
+  streamOrders,
+  closeLiveTracking,
 } = require("../controllers/orderController");
 const { protect, staffOnly } = require("../middleware/auth");
 
@@ -19,6 +22,10 @@ router.use(protect);
 
 router.post("/", placeOrder);
 router.get("/", getMyOrders);
+
+/* Live tracking — before "/:id" so they aren't shadowed. */
+router.get("/live", getLiveOrders);
+router.get("/stream", streamOrders);
 
 /* Admin / manager — declared before "/:id" so they aren't shadowed. */
 router.get("/admin/all", staffOnly, getAllOrders);
@@ -30,5 +37,6 @@ router.get("/:id", getOrderById);
 router.post("/:id/request-cancellation", requestCancellation);
 router.put("/:id/cancellation", staffOnly, resolveCancellation);
 router.put("/:id/status", staffOnly, updateOrderStatus);
+router.put("/:id/live/close", staffOnly, closeLiveTracking);
 
 module.exports = router;

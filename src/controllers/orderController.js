@@ -11,6 +11,26 @@ const {
 const { calculateTotals } = require("../utils/pricing");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
+const {
+  notifyOrderUpdate,
+  notifyLiveClosed,
+  subscribe,
+  toLivePayload,
+} = require("../services/liveOrders");
+
+const isStaffRole = (user) => ["admin", "manager"].includes(user.role);
+
+// Closes the live tracker. Cancelled orders close automatically;
+// delivered orders are closed explicitly by staff (closeLiveTracking).
+function closeLive(order, reason, closedBy) {
+  order.live = {
+    ...(order.live?.toObject?.() || order.live || {}),
+    active: false,
+    closedAt: new Date(),
+    closedBy,
+    closeReason: reason,
+  };
+}
 
 const PAYMENT_METHODS = ["cod", "card", "upi", "netbanking"];
 const ORDER_STATUSES = [
@@ -152,9 +172,17 @@ const placeOrder = asyncHandler(async (req, res) => {
       resolvedAt: null,
       resolvedBy: null,
     },
+    live: { active: true, openedAt: new Date() },
+    timeline: [{ status: "Confirmed", at: new Date() }],
   });
 
   await Cart.updateOne({ user: req.user.id }, { $set: { items: [] } });
+
+  // Notification + live tracker start (checkout success).
+  notifyOrderUpdate(order, {
+    title: `Order placed · #${order.id}`,
+    body: "Thanks for shopping with Orbit Buy! We'll keep you posted here.",
+  });
 
   res.status(201).json({ success: true, order: order.toJSON() });
 });
@@ -242,7 +270,12 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
     );
   }
 
+  const statusChanged = order.status !== status;
   order.status = status;
+
+  if (statusChanged) {
+    order.timeline.push({ status, at: new Date() });
+  }
 
   if (status === "Delivered" && order.paymentMethod === "cod") {
     order.paymentStatus = "Paid";
@@ -260,7 +293,14 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
     order.cancellation.resolvedBy = req.user.name;
   }
 
+  // Cancellation always shuts the live tracker.
+  const closesLive = status === "Cancelled" && order.live?.active;
+  if (closesLive) closeLive(order, "cancelled", req.user.name);
+
   await order.save();
+
+  if (statusChanged) notifyOrderUpdate(order);
+  if (closesLive) notifyLiveClosed(order);
 
   res.json({ success: true, order: order.toJSON() });
 });
@@ -531,7 +571,9 @@ const resolveCancellation = asyncHandler(async (req, res) => {
     );
 
     order.status = "Cancelled";
+    order.timeline.push({ status: "Cancelled", at: new Date() });
     order.cancellation.status = "approved";
+    if (order.live?.active) closeLive(order, "cancelled", req.user.name);
 
     if (order.paymentStatus === "Paid") {
       order.paymentStatus = "Refunded";
@@ -544,6 +586,67 @@ const resolveCancellation = asyncHandler(async (req, res) => {
   order.cancellation.resolvedBy = req.user.name;
 
   await order.save();
+
+  if (action === "approve") {
+    notifyOrderUpdate(order);
+    notifyLiveClosed(order);
+  } else {
+    notifyOrderUpdate(order, {
+      title: `Cancellation request declined · #${order.id}`,
+      body: "Your order will continue as planned.",
+    });
+  }
+
+  res.json({ success: true, order: order.toJSON() });
+});
+
+// @route GET /api/orders/live  — the customer's currently-live orders.
+const getLiveOrders = asyncHandler(async (req, res) => {
+  const orders = await Order.find({
+    userId: req.user.id,
+    "live.active": true,
+  }).sort({ createdAt: -1 });
+
+  res.json({
+    success: true,
+    orders: orders.map((o) => toLivePayload(o)),
+  });
+});
+
+// @route GET /api/orders/stream  — Server-Sent Events, one stream per device.
+const streamOrders = (req, res) => {
+  subscribe(req.user.id, res);
+};
+
+// @route PUT /api/orders/:id/live/close  (staff)
+// Ends live tracking once an order has been delivered. Only an admin or
+// manager may do this; customers can never close it themselves.
+const closeLiveTracking = asyncHandler(async (req, res) => {
+  const order = await Order.findById(req.params.id);
+
+  if (!order) {
+    throw new ApiError(404, "Order not found.");
+  }
+
+  if (!order.live?.active) {
+    throw new ApiError(400, "Live tracking is already closed for this order.");
+  }
+
+  if (order.status !== "Delivered" && order.status !== "Cancelled") {
+    throw new ApiError(
+      400,
+      "Live tracking can only be closed after the order is delivered."
+    );
+  }
+
+  closeLive(
+    order,
+    order.status === "Cancelled" ? "cancelled" : "delivered",
+    req.user.name
+  );
+  await order.save();
+
+  notifyLiveClosed(order);
 
   res.json({ success: true, order: order.toJSON() });
 });
@@ -559,4 +662,7 @@ module.exports = {
   requestCancellation,
   getCancellationRequests,
   resolveCancellation,
+  getLiveOrders,
+  streamOrders,
+  closeLiveTracking,
 };
